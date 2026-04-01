@@ -1,3 +1,33 @@
+// ============================================================
+//  hashrate_monitor_task.c  –  Bitaxe GT800 optimiert
+//
+//  Fixes gegenüber Original:
+//
+//  [FIX-1] Zero-Hashrate-Guard in check_hashrate_anomaly()
+//          Bei Pool-Reconnect / Stratum-Pause fällt current_hashrate
+//          kurz auf 0. Der Original-Code zählte das als Anomalie
+//          (0 < highest && 0 < threshold) → nach 3x → Reinitiate.
+//          Das war die Hauptursache der "willkürlichen Neustarts".
+//          Fix: current_hashrate == 0 → sofort return, kein Zählen.
+//
+//  [FIX-2] NaN/Inf-Schutz für lowerThreshold
+//          Wenn expected_hashrate beim Task-Start noch 0.0 ist,
+//          ergibt die Laufzeit-Berechnung in C: 0.0/0.0 = NaN.
+//          NaN-Vergleiche sind immer FALSE → Monitor blind.
+//          Fix: isfinite()-Check, Fallback auf sicheren Wert 0.50f.
+//
+//  [FIX-3] Threshold-Logging beim Start
+//          Der tatsächlich aktive Threshold war bisher unsichtbar
+//          im Log. Jetzt wird er explizit geloggt.
+//
+//  UNVERÄNDERT:
+//  - Alle Messwert-Funktionen (update_hashrate, update_hash_counter)
+//  - ASIC-Reinitiate-Logik (lowHashrateCount >= 3)
+//  - Poll-Rate (5000ms)
+//  - upperThresholdHashratePercent (2.00f)
+//  - hashrate_monitor_register_read()
+// ============================================================
+
 #include <string.h>
 #include <esp_heap_caps.h>
 #include <math.h>
@@ -11,17 +41,15 @@
 #include "driver/uart.h"
 
 #define EPSILON 0.0001f
-
 #define POLL_RATE 5000
-
-#define HASHRATE_UNIT 0x100000uLL // Hashrate register unit (2^24 hashes)
+#define HASHRATE_UNIT 0x100000uLL
 
 static const char *TAG = "hashrate_monitor";
 static float highest_hashrate = 0.0f;
 static uint8_t lowHashrateCount = 0;
 static int reinitiateCount = 0;
-static float lowerThresholdHashratePercent = 0.50f; // 50% of expected hashrate
-static float upperThresholdHashratePercent = 2.00f; // 200% of expected hashrate
+static float lowerThresholdHashratePercent = 0.50f;
+static float upperThresholdHashratePercent = 2.00f;
 
 static float sum_hashrates(measurement_t * measurement, int asic_count)
 {
@@ -51,11 +79,11 @@ static void clear_measurements(GlobalState * GLOBAL_STATE)
 static void update_hashrate(uint32_t value, measurement_t * measurement, int asic_nr)
 {
     uint8_t flag_long = (value & 0x80000000) >> 31;
-    uint32_t hashrate_value = value & 0x7FFFFFFF;    
+    uint32_t hashrate_value = value & 0x7FFFFFFF;
 
     if (hashrate_value != 0x007FFFFF && !flag_long) {
-        float hashrate = hashrate_value * (float)HASHRATE_UNIT; // Make sure it stays in float
-        measurement[asic_nr].hashrate =  hashrate / 1e9f; // Convert to Gh/s
+        float hashrate = hashrate_value * (float)HASHRATE_UNIT;
+        measurement[asic_nr].hashrate = hashrate / 1e9f;
     }
 }
 
@@ -64,7 +92,7 @@ static void update_hash_counter(uint32_t time_ms, uint32_t value, measurement_t 
     uint32_t previous_time_ms = measurement->time_ms;
     if (previous_time_ms != 0) {
         uint32_t duration_ms = time_ms - previous_time_ms;
-        uint32_t counter = value - measurement->value; // Compute counter difference, handling uint32_t wraparound
+        uint32_t counter = value - measurement->value;
         measurement->hashrate = hashCounterToGhs(duration_ms, counter);
     }
 
@@ -72,49 +100,58 @@ static void update_hash_counter(uint32_t time_ms, uint32_t value, measurement_t 
     measurement->time_ms = time_ms;
 }
 
-void check_hashrate_anomaly(void  *pvParameters, float current_hashrate)
+void check_hashrate_anomaly(void *pvParameters, float current_hashrate)
 {
     GlobalState * GLOBAL_STATE = (GlobalState *)pvParameters;
     HashrateMonitorModule * HASHRATE_MONITOR_MODULE = &GLOBAL_STATE->HASHRATE_MONITOR_MODULE;
 
     float expected_hashrate = GLOBAL_STATE->POWER_MANAGEMENT_MODULE.expected_hashrate;
 
-    if (current_hashrate<highest_hashrate && (current_hashrate < expected_hashrate * lowerThresholdHashratePercent
-        ||current_hashrate > expected_hashrate * upperThresholdHashratePercent)) {
-        lowHashrateCount++;
-        ESP_LOGW(TAG, "Low hashrate detected: %.3f Gh/s (expected: %.3f Gh/s). Count: %d", current_hashrate, expected_hashrate, lowHashrateCount);
-    } else {
-        lowHashrateCount = 0; // Reset counter if hashrate is normal
+    // [FIX-1] Zero-Hashrate-Guard
+    // current_hashrate = 0 tritt normal auf bei:
+    //   - Pool-Reconnect (Stratum sendet kurz keine Jobs)
+    //   - Netzwerkunterbrechung
+    //   - Messregister noch nicht bereit nach Boot
+    // Das ist KEIN ASIC-Fehler → nicht zählen, sofort zurück.
+    // Original-Code zählte das als Anomalie → 3x → Reinitiate.
+    if (current_hashrate < EPSILON) {
+        // Zähler zurücksetzen damit kein teilweiser Zählstand bleibt
+        lowHashrateCount = 0;
         return;
     }
 
-    if (lowHashrateCount >= 3) { // If low hashrate detected 3 times consecutively
+    if (current_hashrate < highest_hashrate &&
+        (current_hashrate < expected_hashrate * lowerThresholdHashratePercent ||
+         current_hashrate > expected_hashrate * upperThresholdHashratePercent)) {
+        lowHashrateCount++;
+        ESP_LOGW(TAG, "Low hashrate detected: %.3f Gh/s (expected: %.3f Gh/s, threshold: %.0f Gh/s). Count: %d",
+                 current_hashrate, expected_hashrate,
+                 expected_hashrate * lowerThresholdHashratePercent,
+                 lowHashrateCount);
+    } else {
+        lowHashrateCount = 0;
+        return;
+    }
+
+    if (lowHashrateCount >= 3) {
         reinitiateCount++;
         ESP_LOGW(TAG, "Reinitiating ASICs due to sustained low hashrate. Reinitiate count: %d", reinitiateCount);
-        
+
         ESP_LOGI(TAG, "Stopping ASIC tasks...");
-        // Mark ASIC as uninitialized to stop any tasks from trying to use UART
         GLOBAL_STATE->ASIC_initalized = false;
-        // Give tasks time to complete any current UART operation and notice the flag
         vTaskDelay(500 / portTICK_PERIOD_MS);
         ESP_LOGI(TAG, "Flushing UART buffers...");
-        // flush driver to clear any stale data
         uart_flush(UART_NUM_1);
         vTaskDelay(100 / portTICK_PERIOD_MS);
-        //clear_measurements(GLOBAL_STATE);
-        
-        // Perform live recovery
-        // Stabilization delay of 2000ms prevents race conditions where tasks are just
-        // starting to use ASIC while power management loop tries to change frequency
+
         uint8_t chip_count = asic_initialize(GLOBAL_STATE, ASIC_INIT_RECOVERY, 2000);
-        
+
         if (chip_count > 0) {
             ESP_LOGI(TAG, "Resuming normal operation.");
         }
-        
-        lowHashrateCount = 0; // Reset counter after reinitialization
-    }
 
+        lowHashrateCount = 0;
+    }
 }
 
 void hashrate_monitor_task(void *pvParameters)
@@ -128,7 +165,25 @@ void hashrate_monitor_task(void *pvParameters)
 
     float expected_hashrate = GLOBAL_STATE->POWER_MANAGEMENT_MODULE.expected_hashrate;
 
-    lowerThresholdHashratePercent = 1.0f-((expected_hashrate/asic_count/hash_domains*2.0f)/expected_hashrate);
+    // Laufzeit-Berechnung des unteren Schwellwerts
+    // GT800 (2 ASICs, 4 Domains): ergibt 0.75 → Trigger bei 600 GH/s
+    lowerThresholdHashratePercent = 1.0f - ((expected_hashrate / asic_count / hash_domains * 2.0f) / expected_hashrate);
+
+    // [FIX-2] NaN/Inf-Schutz
+    // Wenn expected_hashrate beim Task-Start noch 0.0 ist:
+    // C berechnet 0.0/0.0 = NaN → alle Anomalie-Checks schlagen still fehl.
+    // Fallback auf 0.50f als sicheren Minimalwert.
+    if (!isfinite(lowerThresholdHashratePercent) || lowerThresholdHashratePercent <= 0.0f) {
+        ESP_LOGW(TAG, "lowerThreshold calculation produced invalid value (expected_hashrate=%.1f), using fallback 0.50", expected_hashrate);
+        lowerThresholdHashratePercent = 0.50f;
+    }
+
+    // [FIX-3] Threshold explizit loggen — war bisher unsichtbar
+    ESP_LOGI(TAG, "Hashrate thresholds: lower=%.2f (%.0f GH/s), upper=%.2f (%.0f GH/s)",
+             lowerThresholdHashratePercent,
+             expected_hashrate * lowerThresholdHashratePercent,
+             upperThresholdHashratePercent,
+             expected_hashrate * upperThresholdHashratePercent);
 
     HASHRATE_MONITOR_MODULE->total_measurement = heap_caps_malloc(asic_count * sizeof(measurement_t), MALLOC_CAP_SPIRAM);
     if (hash_domains > 0) {
@@ -151,7 +206,7 @@ void hashrate_monitor_task(void *pvParameters)
         vTaskDelay(100 / portTICK_PERIOD_MS);
 
         float current_hashrate = sum_hashrates(HASHRATE_MONITOR_MODULE->total_measurement, asic_count);
-        if(current_hashrate > highest_hashrate) {
+        if (current_hashrate > highest_hashrate) {
             highest_hashrate = current_hashrate;
             ESP_LOGI(TAG, "New Highest Hashrate: %.3f Gh/s", highest_hashrate);
         }
@@ -178,7 +233,7 @@ void hashrate_monitor_register_read(void *pvParameters, register_type_t register
         return;
     }
 
-    switch(register_type) {
+    switch (register_type) {
         case REGISTER_HASHRATE:
             update_hashrate(value, HASHRATE_MONITOR_MODULE->total_measurement, asic_nr);
             break;
@@ -205,13 +260,3 @@ void hashrate_monitor_register_read(void *pvParameters, register_type_t register
             break;
     }
 }
-
-/*
-    // From NerdAxe codebase, temparature conversion?
-    if (asic_result.data & 0x80000000) {
-        float ftemp = (float) (asic_result.data & 0x0000ffff) * 0.171342f - 299.5144f;
-        ESP_LOGI(TAG, "asic %d temp: %.3f", (int) asic_result.asic_nr, ftemp);
-        board->setChipTemp(asic_result.asic_nr, ftemp);
-    }
-    break;
-*/
