@@ -61,12 +61,10 @@ esp_err_t EMC2101_init(int temp_offset_param)
         TAG, "Failed to set data rate"
     );
 
-    // [OPT-2] Temperaturfilterung Level 1 aktivieren
-    // Verhindert Lüfter-Zittern durch einzelne Messausreißer
-    ESP_RETURN_ON_ERROR(
-        i2c_bitaxe_register_write_byte(emc2101_dev_handle, EMC2101_TEMP_FILTER, EMC2101_FILTER_1),
-        TAG, "Failed to set temperature filter"
-    );
+    // NOTE: Temperatur-Filter (OPT-2) entfernt – EMC2101_TEMP_FILTER ist
+    // nicht im Projekt-Header definiert. Der LUT_HYSTERESIS-Register (0x4F)
+    // übernimmt eine ähnliche Funktion, ist aber für Fan-LUT-Betrieb gedacht.
+    // Filterung kann später über EMC2101_LUT_HYSTERESIS ergänzt werden.
 
     return ESP_OK;
 }

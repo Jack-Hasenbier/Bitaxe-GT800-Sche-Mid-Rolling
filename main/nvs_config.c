@@ -21,6 +21,7 @@
 #include "nvs_config.h"
 #include <esp_err.h>
 #include "esp_log.h"
+#include "esp_check.h"
 #include <nvs_flash.h>
 #include <nvs.h>
 #include <freertos/FreeRTOS.h>
@@ -237,8 +238,16 @@ esp_err_t nvs_config_init(void)
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         // [OPT-4] Fehlercode nach Erase/Re-Init explizit prüfen
         ESP_LOGW(TAG, "NVS flash reset needed (%s)", esp_err_to_name(err));
-        ESP_RETURN_ON_ERROR(nvs_flash_erase(), TAG, "NVS flash erase failed");
-        ESP_RETURN_ON_ERROR(nvs_flash_init(),  TAG, "NVS flash re-init failed");
+        err = nvs_flash_erase();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "NVS flash erase failed: %s", esp_err_to_name(err));
+            return err;
+        }
+        err = nvs_flash_init();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "NVS flash re-init failed: %s", esp_err_to_name(err));
+            return err;
+        }
     }
 
     err = nvs_open(NVS_CONFIG_NAMESPACE, NVS_READWRITE, &handle);

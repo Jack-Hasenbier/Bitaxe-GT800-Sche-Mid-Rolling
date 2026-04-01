@@ -29,11 +29,6 @@
 
 static const char *TAG = "asic_task";
 
-// [OPT-1] Maximale Wartezeit auf neuen Job aus der Queue (ms).
-// portMAX_DELAY → stiller Deadlock bei leerem Pool.
-// 500 ms → Task bleibt reaktiv, erholt sich nach Stratum-Pause.
-#define ASIC_TASK_QUEUE_TIMEOUT_MS  500
-
 // [OPT-2] Schwellwert für ASIC-Timeout-Warnung (aufeinanderfolgende Timeouts)
 #define ASIC_SEMAPHORE_TIMEOUT_WARN 5
 
@@ -66,20 +61,11 @@ void ASIC_task(void *pvParameters)
             continue;
         }
 
-        // [OPT-1] Queue mit Timeout abfragen statt portMAX_DELAY
-        // Verhindert Deadlock wenn Stratum-Task keine Jobs mehr liefert
-        bm_job *next_bm_job = (bm_job *)queue_dequeue_timeout(
-            &GLOBAL_STATE->ASIC_jobs_queue,
-            ASIC_TASK_QUEUE_TIMEOUT_MS / portTICK_PERIOD_MS
-        );
-
-        if (next_bm_job == NULL) {
-            // Kein Job verfügbar – kurz warten und neu versuchen
-            // (passiert bei Stratum-Reconnect oder Pool-Wechsel)
-            ESP_LOGD(TAG, "Job queue empty, waiting...");
-            vTaskDelay(10 / portTICK_PERIOD_MS);
-            continue;
-        }
+        // Job aus Queue holen (blockiert bis Job verfügbar)
+        // Hinweis: Bei Stratum-Ausfall blockiert dies bis ein neuer Job eintrifft.
+        // Der ASIC-Watchdog (Semaphor-Timeout unten) erkennt in dieser Zeit trotzdem
+        // fehlende ASIC-Antworten, da er auf den letzten gesendeten Job wartet.
+        bm_job *next_bm_job = (bm_job *)queue_dequeue(&GLOBAL_STATE->ASIC_jobs_queue);
 
         ASIC_send_work(GLOBAL_STATE, next_bm_job);
 
