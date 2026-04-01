@@ -20,8 +20,8 @@ static const char *TAG = "hashrate_monitor";
 static float highest_hashrate = 0.0f;
 static uint8_t lowHashrateCount = 0;
 static int reinitiateCount = 0;
-static float lowerThresholdHashratePercent = 0.70f; // 82% of expected hashrate
-static float upperThresholdHashratePercent = 1.80f; // 150% of expected hashrate
+static float lowerThresholdHashratePercent = 0.50f; // 50% of expected hashrate
+static float upperThresholdHashratePercent = 2.00f; // 200% of expected hashrate
 
 static float sum_hashrates(measurement_t * measurement, int asic_count)
 {
