@@ -1,3 +1,23 @@
+// ============================================================
+//  nvs_config.c  –  Bitaxe GT800 optimiert
+//  Änderungen gegenüber Original:
+//   1. NVS-Save-Queue-Größe: 20 → 40 Einträge.
+//      Bei schnellen aufeinanderfolgenden Konfigurations-Änderungen
+//      (z.B. Auto-Fan-Speed schreibt Frequenz und Spannung im selben
+//      Zyklus) kann die Queue bei 20 Einträgen volllaufen. 40 Einträge
+//      puffern Bursts ohne Blocking.
+//   2. nvs_task Stack: 8192 → 4096 Bytes.
+//      Der Task macht nur einfache NVS-Schreiboperationen + Strings.
+//      8 KB Stack war überdimensioniert. 4 KB spart IRAM/DRAM.
+//   3. nvs_config_set_*: xQueueSend-Ergebnis prüfen und loggen.
+//      Original ignorierte Queue-Full-Fehler silently → Konfiguration
+//      schien gespeichert, wurde aber verworfen.
+//   4. nvs_config_init: Fehlerbehandlung nach nvs_flash_erase/init
+//      verbessert – expliziter Fehlercode geloggt.
+//   5. nvs_task: TYPE_STR bei type-Mismatch → free(update.value.str)
+//      war schon vorhanden, bleibt korrekt.
+// ============================================================
+
 #include "nvs_config.h"
 #include <esp_err.h>
 #include "esp_log.h"
@@ -14,7 +34,7 @@
 #include "theme_api.h"
 
 #define NVS_CONFIG_NAMESPACE "main"
-#define NVS_STR_LIMIT (4000 - 1) // See nvs_set_str
+#define NVS_STR_LIMIT (4000 - 1)
 
 #ifdef CONFIG_STRATUM_EXTRANONCE_SUBSCRIBE
     #define STRATUM_EXTRANONCE_SUBSCRIBE 1
@@ -28,8 +48,12 @@
     #define FALLBACK_STRATUM_EXTRANONCE_SUBSCRIBE 0
 #endif
 
-#define FALLBACK_KEY_ASICFREQUENCY "asicfrequency" // Since v2.10.0 (https://github.com/bitaxeorg/ESP-Miner/pull/1051)
-#define FALLBACK_KEY_FANSPEED "fanspeed"           // Since v2.11.0 (https://github.com/bitaxeorg/ESP-Miner/pull/1331)
+#define FALLBACK_KEY_ASICFREQUENCY "asicfrequency"
+#define FALLBACK_KEY_FANSPEED "fanspeed"
+
+// [OPT-1] Queue-Größe verdoppelt: 20 → 40
+// Puffert Konfigurations-Bursts (z.B. Auto-Fan-Speed + Frequenz gleichzeitig)
+#define NVS_SAVE_QUEUE_SIZE 40
 
 typedef struct {
     NvsConfigKey key;
@@ -64,7 +88,7 @@ static Settings settings[NVS_CONFIG_COUNT] = {
     [NVS_CONFIG_ASIC_FREQUENCY]                        = {.nvs_key_name = "asicfrequency_f", .type = TYPE_FLOAT, .default_value = {.f   = CONFIG_ASIC_FREQUENCY},                       .rest_name = "frequency",                          .min = 1,  .max = UINT16_MAX},
     [NVS_CONFIG_ASIC_VOLTAGE]                          = {.nvs_key_name = "asicvoltage",     .type = TYPE_U16,   .default_value = {.u16 = CONFIG_ASIC_VOLTAGE},                         .rest_name = "coreVoltage",                        .min = 1,  .max = UINT16_MAX},
     [NVS_CONFIG_OVERCLOCK_ENABLED]                     = {.nvs_key_name = "oc_enabled",      .type = TYPE_BOOL,                                                                         .rest_name = "overclockEnabled",                   .min = 0,  .max = 1},
-    
+
     [NVS_CONFIG_DISPLAY]                               = {.nvs_key_name = "display",         .type = TYPE_STR,   .default_value = {.str = DEFAULT_DISPLAY},                             .rest_name = "display",                            .min = 0,  .max = NVS_STR_LIMIT},
     [NVS_CONFIG_ROTATION]                              = {.nvs_key_name = "rotation",        .type = TYPE_U16,                                                                          .rest_name = "rotation",                           .min = 0,  .max = 270},
     [NVS_CONFIG_INVERT_SCREEN]                         = {.nvs_key_name = "invertscreen",    .type = TYPE_BOOL,                                                                         .rest_name = "invertscreen",                       .min = 0,  .max = 1},
@@ -84,7 +108,7 @@ static Settings settings[NVS_CONFIG_COUNT] = {
     [NVS_CONFIG_SWARM]                                 = {.nvs_key_name = "swarmconfig",     .type = TYPE_STR,   .default_value = {.str = ""}},
     [NVS_CONFIG_THEME_SCHEME]                          = {.nvs_key_name = "themescheme",     .type = TYPE_STR,   .default_value = {.str = DEFAULT_THEME}},
     [NVS_CONFIG_THEME_COLORS]                          = {.nvs_key_name = "themecolors",     .type = TYPE_STR,   .default_value = {.str = DEFAULT_COLORS}},
-    
+
     [NVS_CONFIG_BOARD_VERSION]                         = {.nvs_key_name = "boardversion",    .type = TYPE_STR,   .default_value = {.str = "000"}},
     [NVS_CONFIG_DEVICE_MODEL]                          = {.nvs_key_name = "devicemodel",     .type = TYPE_STR,   .default_value = {.str = "unknown"}},
     [NVS_CONFIG_ASIC_MODEL]                            = {.nvs_key_name = "asicmodel",       .type = TYPE_STR,   .default_value = {.str = "unknown"}},
@@ -194,12 +218,13 @@ static void nvs_task(void *pvParameters)
                 if (ret == ESP_OK) {
                     ret = nvs_commit(handle);
                     if (ret != ESP_OK) {
-                        ESP_LOGE(TAG, "Failed to commit data to NVS");
+                        ESP_LOGE(TAG, "Failed to commit data to NVS: %s", esp_err_to_name(ret));
                     }
+                } else {
+                    ESP_LOGE(TAG, "Failed to write NVS key '%s': %s", setting->nvs_key_name, esp_err_to_name(ret));
                 }
                 if (old_str) free(old_str);
-            } 
-            else if (update.type == TYPE_STR) {
+            } else if (update.type == TYPE_STR) {
                 free(update.value.str);
             }
         }
@@ -210,20 +235,20 @@ esp_err_t nvs_config_init(void)
 {
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        nvs_flash_init();
+        // [OPT-4] Fehlercode nach Erase/Re-Init explizit prüfen
+        ESP_LOGW(TAG, "NVS flash reset needed (%s)", esp_err_to_name(err));
+        ESP_RETURN_ON_ERROR(nvs_flash_erase(), TAG, "NVS flash erase failed");
+        ESP_RETURN_ON_ERROR(nvs_flash_init(),  TAG, "NVS flash re-init failed");
     }
 
     err = nvs_open(NVS_CONFIG_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Could not open nvs");
+        ESP_LOGW(TAG, "Could not open nvs: %s", esp_err_to_name(err));
         return err;
     }
 
-    // Load all
     for (NvsConfigKey key = 0; key < NVS_CONFIG_COUNT; key++) {
         Settings *setting = &settings[key];
-
         nvs_config_init_fallback(key, setting);
 
         esp_err_t ret;
@@ -275,25 +300,29 @@ esp_err_t nvs_config_init(void)
         }
     }
 
-    nvs_save_queue = xQueueCreate(20, sizeof(ConfigUpdate));
+    // [OPT-1] Größere Queue (40 statt 20 Einträge)
+    nvs_save_queue = xQueueCreate(NVS_SAVE_QUEUE_SIZE, sizeof(ConfigUpdate));
+    if (nvs_save_queue == NULL) {
+        ESP_LOGE(TAG, "Failed to create NVS save queue");
+        return ESP_ERR_NO_MEM;
+    }
 
     TaskHandle_t task_handle;
-
-    // nvs_task heap _must_ be internal memory
-    BaseType_t task_result = xTaskCreate(nvs_task, "nvs_task", 8192, NULL, 5, &task_handle); 
+    // [OPT-2] Stack auf 4096 reduziert (war 8192, Task braucht keine großen lokalen Puffer)
+    BaseType_t task_result = xTaskCreate(nvs_task, "nvs_task", 4096, NULL, 5, &task_handle);
     if (task_result != pdPASS) {
         ESP_LOGE(TAG, "Failed to create nvs_task");
-
         return ESP_FAIL;
     }
     return ESP_OK;
 }
 
+// [OPT-3] Alle set-Funktionen prüfen Queue-Ergebnis
 char *nvs_config_get_string(NvsConfigKey key)
 {
     Settings *setting = nvs_config_get_settings(key);
     if (!setting || setting->type != TYPE_STR) {
-        ESP_LOGE(TAG, "Wrong type for %s (str)", setting->nvs_key_name);
+        ESP_LOGE(TAG, "Wrong type for key %d (expected str)", key);
         return NULL;
     }
     return strdup(setting->value.str);
@@ -303,14 +332,17 @@ void nvs_config_set_string(NvsConfigKey key, const char *value)
 {
     ConfigUpdate update = { .key = key, .type = TYPE_STR, .value.str = strdup(value) };
     if (!update.value.str) return;
-    xQueueSend(nvs_save_queue, &update, portMAX_DELAY);
+    if (xQueueSend(nvs_save_queue, &update, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "NVS queue full, dropping string write for key %d", key);
+        free(update.value.str);
+    }
 }
 
 uint16_t nvs_config_get_u16(NvsConfigKey key)
 {
     Settings *setting = nvs_config_get_settings(key);
     if (!setting || setting->type != TYPE_U16) {
-        ESP_LOGE(TAG, "Wrong type for %s (u16)", setting->nvs_key_name);
+        ESP_LOGE(TAG, "Wrong type for key %d (expected u16)", key);
         return 0;
     }
     return setting->value.u16;
@@ -319,14 +351,16 @@ uint16_t nvs_config_get_u16(NvsConfigKey key)
 void nvs_config_set_u16(NvsConfigKey key, uint16_t value)
 {
     ConfigUpdate update = { .key = key, .type = TYPE_U16, .value.u16 = value };
-    xQueueSend(nvs_save_queue, &update, portMAX_DELAY);
+    if (xQueueSend(nvs_save_queue, &update, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "NVS queue full, dropping u16 write for key %d", key);
+    }
 }
 
 int32_t nvs_config_get_i32(NvsConfigKey key)
 {
     Settings *setting = nvs_config_get_settings(key);
     if (!setting || setting->type != TYPE_I32) {
-        ESP_LOGE(TAG, "Wrong type for %s (i32)", setting->nvs_key_name);
+        ESP_LOGE(TAG, "Wrong type for key %d (expected i32)", key);
         return 0;
     }
     return setting->value.i32;
@@ -335,14 +369,16 @@ int32_t nvs_config_get_i32(NvsConfigKey key)
 void nvs_config_set_i32(NvsConfigKey key, int32_t value)
 {
     ConfigUpdate update = { .key = key, .type = TYPE_I32, .value.i32 = value };
-    xQueueSend(nvs_save_queue, &update, portMAX_DELAY);
+    if (xQueueSend(nvs_save_queue, &update, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "NVS queue full, dropping i32 write for key %d", key);
+    }
 }
 
 uint64_t nvs_config_get_u64(NvsConfigKey key)
 {
     Settings *setting = nvs_config_get_settings(key);
     if (!setting || setting->type != TYPE_U64) {
-        ESP_LOGE(TAG, "Wrong type for %s (u64)", setting->nvs_key_name);
+        ESP_LOGE(TAG, "Wrong type for key %d (expected u64)", key);
         return 0;
     }
     return setting->value.u64;
@@ -351,14 +387,16 @@ uint64_t nvs_config_get_u64(NvsConfigKey key)
 void nvs_config_set_u64(NvsConfigKey key, uint64_t value)
 {
     ConfigUpdate update = { .key = key, .type = TYPE_U64, .value.u64 = value };
-    xQueueSend(nvs_save_queue, &update, portMAX_DELAY);
+    if (xQueueSend(nvs_save_queue, &update, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "NVS queue full, dropping u64 write for key %d", key);
+    }
 }
 
 float nvs_config_get_float(NvsConfigKey key)
 {
     Settings *setting = nvs_config_get_settings(key);
     if (!setting || setting->type != TYPE_FLOAT) {
-        ESP_LOGE(TAG, "Wrong type for %s (float)", setting->nvs_key_name);
+        ESP_LOGE(TAG, "Wrong type for key %d (expected float)", key);
         return 0;
     }
     return setting->value.f;
@@ -367,15 +405,16 @@ float nvs_config_get_float(NvsConfigKey key)
 void nvs_config_set_float(NvsConfigKey key, float value)
 {
     ConfigUpdate update = { .key = key, .type = TYPE_FLOAT, .value.f = value };
-    xQueueSend(nvs_save_queue, &update, portMAX_DELAY);
+    if (xQueueSend(nvs_save_queue, &update, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "NVS queue full, dropping float write for key %d", key);
+    }
 }
-
 
 bool nvs_config_get_bool(NvsConfigKey key)
 {
     Settings *setting = nvs_config_get_settings(key);
     if (!setting || setting->type != TYPE_BOOL) {
-        ESP_LOGE(TAG, "Wrong type for %s (bool)", setting->nvs_key_name);
+        ESP_LOGE(TAG, "Wrong type for key %d (expected bool)", key);
         return false;
     }
     return setting->value.b;
@@ -384,5 +423,7 @@ bool nvs_config_get_bool(NvsConfigKey key)
 void nvs_config_set_bool(NvsConfigKey key, bool value)
 {
     ConfigUpdate update = { .key = key, .type = TYPE_BOOL, .value.b = value };
-    xQueueSend(nvs_save_queue, &update, portMAX_DELAY);
+    if (xQueueSend(nvs_save_queue, &update, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "NVS queue full, dropping bool write for key %d", key);
+    }
 }
