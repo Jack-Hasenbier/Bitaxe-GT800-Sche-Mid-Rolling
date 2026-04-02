@@ -43,16 +43,18 @@ static TPS546_CONFIG TPS546_CONFIG_DEFAULT = {
     .TPS546_INIT_IOUT_OC_FAULT_LIMIT = 50.00
 };
 
-// In vcore.c - Korrektur für Gamma Turbo (2x BM1370)
 static TPS546_CONFIG TPS546_CONFIG_GAMMATURBO = {
     .TPS546_INIT_VIN_ON              = 11.0,
     .TPS546_INIT_VIN_OFF             = 10.5,
-    .TPS546_INIT_VIN_UV_WARN_LIMIT   = 10.5, // [FIX-1] Puffer gegen Reboots
+    // [FIX-1] War 11.0V = identisch mit VIN_ON → false-positive VIN_UV bei
+    // jedem Lasteinbruch. 10.5V = VIN_OFF gibt 0.5V Puffer, verhindert
+    // unnötige power_fault-Events bei kurzen Netzspannungseinbrüchen.
+    .TPS546_INIT_VIN_UV_WARN_LIMIT   = 10.5,
     .TPS546_INIT_VIN_OV_FAULT_LIMIT  = 14.0,
     .TPS546_INIT_SCALE_LOOP          = 0.25,
     .TPS546_INIT_VOUT_MIN            = 1,
     .TPS546_INIT_VOUT_MAX            = 3,
-    .TPS546_INIT_VOUT_COMMAND        = 1.2,  // Erzwungener Startwert 1200mV
+    .TPS546_INIT_VOUT_COMMAND        = 1.2,
     .TPS546_INIT_IOUT_OC_WARN_LIMIT  = 60.00,
     .TPS546_INIT_IOUT_OC_FAULT_LIMIT = 75.00
 };

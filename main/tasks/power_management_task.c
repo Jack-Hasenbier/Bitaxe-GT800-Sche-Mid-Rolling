@@ -284,23 +284,14 @@ void POWER_MANAGEMENT_task(void * pvParameters)
             }
         }
 
-   // In power_management_task.c
-uint16_t core_voltage = nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE);
+        uint16_t core_voltage = nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE);
+        float asic_frequency = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
 
-// --- ERZWUNGENE MINDESTSPANNUNG START ---
-if (core_voltage < 1200) {
-    // Wenn der Wert unter 1200 liegt, überschreiben wir ihn sofort
-    core_voltage = 1200; 
-}
-// --- ERZWUNGENE MINDESTSPANNUNG ENDE ---
-
-float asic_frequency = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
-
-if (core_voltage != last_core_voltage) {
-    ESP_LOGI(TAG, "Erzwinge VCore: %umV (Override aktiv)", core_voltage); //
-    VCORE_set_voltage(GLOBAL_STATE, (double) core_voltage / 1000.0);
-    last_core_voltage = core_voltage;
-}
+        if (core_voltage != last_core_voltage) {
+            ESP_LOGI(TAG, "setting new vcore voltage to %umV", core_voltage);
+            VCORE_set_voltage(GLOBAL_STATE, (double) core_voltage / 1000.0);
+            last_core_voltage = core_voltage;
+        }
 
         if (asic_frequency != last_asic_frequency) {
             ESP_LOGI(TAG, "New ASIC frequency requested: %g MHz (current: %g MHz)", asic_frequency, last_asic_frequency);
