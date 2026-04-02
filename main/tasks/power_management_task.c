@@ -174,15 +174,17 @@ void POWER_MANAGEMENT_task(void * pvParameters)
             }
             ESP_LOGI(TAG, "Temperature normalized after %d cooling cycles. Reinitializing ASIC...", cooling_cycles);
             
-            uint16_t reduced_voltage = last_known_asic_voltage > ASIC_REDUCTION ? last_known_asic_voltage - ASIC_REDUCTION : 1000;
-            float reduced_asic_frequency = last_known_asic_frequency > ASIC_REDUCTION ? last_known_asic_frequency - ASIC_REDUCTION : 400.0;
-            
-            nvs_config_set_u16(NVS_CONFIG_ASIC_VOLTAGE, reduced_voltage);
-            nvs_config_set_float(NVS_CONFIG_ASIC_FREQUENCY, reduced_asic_frequency);
-            
-            ESP_LOGI(TAG, "Restoring core voltage to %umV = %.3fV (reduced from %umV = %.3fV)...",
-                     reduced_voltage, reduced_voltage/1000.0, last_known_asic_voltage, last_known_asic_voltage/1000.0);
-            VCORE_set_voltage(GLOBAL_STATE, (double)reduced_voltage / 1000.0);
+            // [FIX-4] Spannungsreduzierung nach Overheat NICHT permanent in NVS schreiben.
+            // Original: reduced_voltage = last_known - 100mV wurde in NVS gespeichert
+            // → Miner startet beim nächsten Boot dauerhaft mit 1100mV statt 1200mV
+            // → Mehrere Overheats = schleichende Reduzierung bis zum Stabilitätsverlust
+            //
+            // Fix: Originale Werte aus NVS wiederherstellen (kein Schreiben),
+            // nur temporär reduzierte Spannung für diesen Boot-Zyklus setzen.
+            // Der User kann bewusst die Spannung reduzieren falls gewünscht.
+            ESP_LOGI(TAG, "Restoring core voltage to %umV = %.3fV (original settings preserved in NVS)...",
+                     last_known_asic_voltage, last_known_asic_voltage/1000.0);
+            VCORE_set_voltage(GLOBAL_STATE, (double)last_known_asic_voltage / 1000.0);
             vTaskDelay(500 / portTICK_PERIOD_MS); // Wait for voltage to stabilize
             
             ESP_LOGI(TAG, "Stopping ASIC tasks...");

@@ -751,16 +751,49 @@ esp_err_t TPS546_check_status(GlobalState * GLOBAL_STATE) {
     SystemModule * SYSTEM_MODULE = &GLOBAL_STATE->SYSTEM_MODULE;
     uint16_t status;
 
+    // [FIX-2] Debounce-Zähler: erst nach 3 aufeinanderfolgenden Fault-Messungen
+    // wird power_fault gesetzt. Ein einziger transienter Einbruch am 12V-Netzteil
+    // (z.B. Lastwechsel anderer Verbraucher) triggert keinen false-positive Fault.
+    // 3 Zyklen × 1800ms Poll-Rate = ~5.4 Sekunden anhaltender Fault → echter Fehler.
+    static uint8_t fault_count = 0;
+
     ESP_RETURN_ON_ERROR(smb_read_word(PMBUS_STATUS_WORD, &status), TAG, "Failed to read STATUS_WORD");
-    //determine if this is a fault we care about
-    if (status & (TPS546_STATUS_OFF | TPS546_STATUS_VOUT_OV | TPS546_STATUS_IOUT_OC | TPS546_STATUS_VIN_UV | TPS546_STATUS_TEMP)) {
-        if (SYSTEM_MODULE->power_fault == 0) {
-            ESP_RETURN_ON_ERROR(TPS546_parse_status(status), TAG, "Failed to parse STATUS_WORD");
-            SYSTEM_MODULE->power_fault = 1;
+
+    if (status & (TPS546_STATUS_OFF | TPS546_STATUS_VOUT_OV |
+                  TPS546_STATUS_IOUT_OC | TPS546_STATUS_VIN_UV |
+                  TPS546_STATUS_TEMP)) {
+
+        fault_count++;
+
+        if (fault_count >= 3) {
+            // Anhaltender Fault — jetzt wirklich reagieren
+            if (SYSTEM_MODULE->power_fault == 0) {
+                ESP_LOGW(TAG, "Sustained power fault after %d checks, reporting", fault_count);
+                ESP_RETURN_ON_ERROR(TPS546_parse_status(status), TAG, "Failed to parse STATUS_WORD");
+                SYSTEM_MODULE->power_fault = 1;
+            }
+        } else {
+            // Transienter Fault — warten ob er bleibt
+            ESP_LOGD(TAG, "Transient fault (count=%d/3), waiting for confirmation", fault_count);
         }
+
     } else {
-        SYSTEM_MODULE->power_fault = 0;
+        // Kein Fault — Zähler zurücksetzen
+        if (fault_count > 0) {
+            ESP_LOGD(TAG, "Fault cleared after %d count(s)", fault_count);
+        }
+        fault_count = 0;
+
+        // [FIX-3] Latched Fault-Bits im TPS546 löschen sobald Status wieder sauber.
+        // Verhindert dass der TPS546 dauerhaft im Fault-Zustand bleibt nach
+        // einem transienten Event (latched Bits bleiben sonst bis zum nächsten Clear).
+        if (SYSTEM_MODULE->power_fault != 0) {
+            ESP_LOGI(TAG, "Power fault resolved, clearing TPS546 fault registers");
+            TPS546_clear_faults();
+            SYSTEM_MODULE->power_fault = 0;
+        }
     }
+
     return ESP_OK;
 }
 

@@ -1,3 +1,19 @@
+// ============================================================
+//  vcore.c  –  Bitaxe GT800 optimiert
+//
+//  [FIX-1] TPS546_CONFIG_GAMMATURBO: VIN_UV_WARN_LIMIT
+//          Original: 11.0V (identisch mit VIN_ON)
+//          Fix:      10.5V (0.5V Puffer unter VIN_ON)
+//
+//          Das 12V-Netzteil des GT800 hat unter Last kurze
+//          Spannungseinbrüche von 0.5–1V. Mit VIN_UV_WARN_LIMIT
+//          = VIN_ON = 11.0V wurde bei jedem Einbruch sofort
+//          TPS546_STATUS_VIN_UV gesetzt → power_fault → ASIC
+//          bekommt kurz instabile Spannung → Hash-Domains fallen
+//          aus → hashrate_monitor triggert Reinitiate.
+//          10.5V entspricht VIN_OFF und gibt ausreichend Puffer.
+// ============================================================
+
 #include <stdio.h>
 #include <math.h>
 #include "esp_log.h"
@@ -15,56 +31,51 @@
 static const char *TAG = "vcore";
 
 static TPS546_CONFIG TPS546_CONFIG_DEFAULT = {
-    /* vin voltage */
-    .TPS546_INIT_VIN_ON = 4.8,
-    .TPS546_INIT_VIN_OFF = 4.0,
-    .TPS546_INIT_VIN_UV_WARN_LIMIT = 0, //Set to 0 to ignore. TI Bug in this register
-    .TPS546_INIT_VIN_OV_FAULT_LIMIT = 6.5,
-    /* vout voltage */
-    .TPS546_INIT_SCALE_LOOP = 0.25,
-    .TPS546_INIT_VOUT_MIN = 1,
-    .TPS546_INIT_VOUT_MAX = 2,
-    .TPS546_INIT_VOUT_COMMAND = 1.2,
-    /* iout current */
-    .TPS546_INIT_IOUT_OC_WARN_LIMIT = 45.00, /* A */
-    .TPS546_INIT_IOUT_OC_FAULT_LIMIT = 50.00 /* A */
+    .TPS546_INIT_VIN_ON              = 4.8,
+    .TPS546_INIT_VIN_OFF             = 4.0,
+    .TPS546_INIT_VIN_UV_WARN_LIMIT   = 0,   // Set to 0 to ignore. TI Bug in this register
+    .TPS546_INIT_VIN_OV_FAULT_LIMIT  = 6.5,
+    .TPS546_INIT_SCALE_LOOP          = 0.25,
+    .TPS546_INIT_VOUT_MIN            = 1,
+    .TPS546_INIT_VOUT_MAX            = 2,
+    .TPS546_INIT_VOUT_COMMAND        = 1.2,
+    .TPS546_INIT_IOUT_OC_WARN_LIMIT  = 45.00,
+    .TPS546_INIT_IOUT_OC_FAULT_LIMIT = 50.00
 };
 
 static TPS546_CONFIG TPS546_CONFIG_GAMMATURBO = {
-    /* vin voltage */
-    .TPS546_INIT_VIN_ON = 11.0,
-    .TPS546_INIT_VIN_OFF = 10.5,
-    .TPS546_INIT_VIN_UV_WARN_LIMIT = 11.0,
-    .TPS546_INIT_VIN_OV_FAULT_LIMIT = 14.0,
-    /* vout voltage */
-    .TPS546_INIT_SCALE_LOOP = 0.25,
-    .TPS546_INIT_VOUT_MIN = 1,
-    .TPS546_INIT_VOUT_MAX = 3,
-    .TPS546_INIT_VOUT_COMMAND = 1.2,
-    /* iout current */
-    .TPS546_INIT_IOUT_OC_WARN_LIMIT = 60.00, /* A */
-    .TPS546_INIT_IOUT_OC_FAULT_LIMIT = 75.00 /* A */
+    .TPS546_INIT_VIN_ON              = 11.0,
+    .TPS546_INIT_VIN_OFF             = 10.5,
+    // [FIX-1] War 11.0V = identisch mit VIN_ON → false-positive VIN_UV bei
+    // jedem Lasteinbruch. 10.5V = VIN_OFF gibt 0.5V Puffer, verhindert
+    // unnötige power_fault-Events bei kurzen Netzspannungseinbrüchen.
+    .TPS546_INIT_VIN_UV_WARN_LIMIT   = 10.5,
+    .TPS546_INIT_VIN_OV_FAULT_LIMIT  = 14.0,
+    .TPS546_INIT_SCALE_LOOP          = 0.25,
+    .TPS546_INIT_VOUT_MIN            = 1,
+    .TPS546_INIT_VOUT_MAX            = 3,
+    .TPS546_INIT_VOUT_COMMAND        = 1.2,
+    .TPS546_INIT_IOUT_OC_WARN_LIMIT  = 60.00,
+    .TPS546_INIT_IOUT_OC_FAULT_LIMIT = 75.00
 };
 
 static TPS546_CONFIG TPS546_CONFIG_HEX = {
-    /* vin voltage */
-    .TPS546_INIT_VIN_ON = 11.5,
-    .TPS546_INIT_VIN_OFF = 10.5,
-    .TPS546_INIT_VIN_UV_WARN_LIMIT = 11.0,
-    .TPS546_INIT_VIN_OV_FAULT_LIMIT = 14.0,
-    /* vout voltage */
-    .TPS546_INIT_SCALE_LOOP = 0.125,
-    .TPS546_INIT_VOUT_MIN = 2.5,
-    .TPS546_INIT_VOUT_MAX = 4.5,
-    .TPS546_INIT_VOUT_COMMAND = 3.6,
-    /* iout current */
-    .TPS546_INIT_IOUT_OC_WARN_LIMIT = 55.00, /* A */
-    .TPS546_INIT_IOUT_OC_FAULT_LIMIT = 65.00 /* A */
+    .TPS546_INIT_VIN_ON              = 11.5,
+    .TPS546_INIT_VIN_OFF             = 10.5,
+    .TPS546_INIT_VIN_UV_WARN_LIMIT   = 11.0,
+    .TPS546_INIT_VIN_OV_FAULT_LIMIT  = 14.0,
+    .TPS546_INIT_SCALE_LOOP          = 0.125,
+    .TPS546_INIT_VOUT_MIN            = 2.5,
+    .TPS546_INIT_VOUT_MAX            = 4.5,
+    .TPS546_INIT_VOUT_COMMAND        = 3.6,
+    .TPS546_INIT_IOUT_OC_WARN_LIMIT  = 55.00,
+    .TPS546_INIT_IOUT_OC_FAULT_LIMIT = 65.00
 };
 
 esp_err_t VCORE_init(GlobalState * GLOBAL_STATE)
 {
-    ESP_RETURN_ON_FALSE(GLOBAL_STATE->DEVICE_CONFIG.family.voltage_domains != 0, ESP_FAIL, TAG, "voltage_domains not defined");
+    ESP_RETURN_ON_FALSE(GLOBAL_STATE->DEVICE_CONFIG.family.voltage_domains != 0,
+                        ESP_FAIL, TAG, "voltage_domains not defined");
 
     if (GLOBAL_STATE->DEVICE_CONFIG.DS4432U) {
         ESP_RETURN_ON_ERROR(DS4432U_init(), TAG, "DS4432 init failed!");
@@ -99,7 +110,6 @@ esp_err_t VCORE_init(GlobalState * GLOBAL_STATE)
         if (barrel_jack_plugged_in == 1 || GLOBAL_STATE->DEVICE_CONFIG.asic_enable) {
             gpio_set_level(GPIO_ASIC_ENABLE, 0);
         } else {
-            // turn ASIC off
             gpio_set_level(GPIO_ASIC_ENABLE, 1);
         }
     }
@@ -110,7 +120,7 @@ esp_err_t VCORE_init(GlobalState * GLOBAL_STATE)
 esp_err_t VCORE_set_voltage(GlobalState * GLOBAL_STATE, float core_voltage)
 {
     ESP_LOGI(TAG, "Set ASIC voltage = %.3fV", core_voltage);
- 
+
     if (GLOBAL_STATE->DEVICE_CONFIG.DS4432U) {
         if (core_voltage != 0.0f) {
             ESP_RETURN_ON_ERROR(DS4432U_set_voltage(core_voltage), TAG, "DS4432U set voltage failed!");
@@ -127,7 +137,7 @@ esp_err_t VCORE_set_voltage(GlobalState * GLOBAL_STATE, float core_voltage)
     return ESP_OK;
 }
 
-int16_t VCORE_get_voltage_mv(GlobalState * GLOBAL_STATE) 
+int16_t VCORE_get_voltage_mv(GlobalState * GLOBAL_STATE)
 {
     if (GLOBAL_STATE->DEVICE_CONFIG.TPS546) {
         return TPS546_get_vout() / GLOBAL_STATE->DEVICE_CONFIG.family.voltage_domains * 1000;
@@ -135,7 +145,7 @@ int16_t VCORE_get_voltage_mv(GlobalState * GLOBAL_STATE)
     return ADC_get_vcore();
 }
 
-esp_err_t VCORE_check_fault(GlobalState * GLOBAL_STATE) 
+esp_err_t VCORE_check_fault(GlobalState * GLOBAL_STATE)
 {
     if (GLOBAL_STATE->DEVICE_CONFIG.TPS546) {
         ESP_RETURN_ON_ERROR(TPS546_check_status(GLOBAL_STATE), TAG, "TPS546 check status failed!");
