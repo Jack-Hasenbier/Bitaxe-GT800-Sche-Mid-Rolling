@@ -166,8 +166,8 @@ void hashrate_monitor_task(void *pvParameters)
     float expected_hashrate = GLOBAL_STATE->POWER_MANAGEMENT_MODULE.expected_hashrate;
 
     // Laufzeit-Berechnung des unteren Schwellwerts
-    // GT800 (2 ASICs, 4 Domains): ergibt 0.75 → Trigger bei 600 GH/s
-    lowerThresholdHashratePercent = 1.0f - ((expected_hashrate / asic_count / hash_domains * 2.0f) / expected_hashrate);
+    // GT800 (2 ASICs, 4 Domains): ergibt 0.75 → Trigger bei 600 GH/s, hash_domains von 2.0f gesetzt auf 3.0f
+    lowerThresholdHashratePercent = 1.0f - ((expected_hashrate / asic_count / hash_domains * 3.0f) / expected_hashrate);
 
     // [FIX-2] NaN/Inf-Schutz
     // Wenn expected_hashrate beim Task-Start noch 0.0 ist:
