@@ -748,4 +748,10 @@ export class HomeComponent implements OnInit, OnDestroy {
       .filter(([key, ]) => key !== 'vrTemp' || info.vrTemp)
       .map(([key, value]) => ({name: value, value: key}));
   }
+
+  public getSharesPerHour(info: ISystemInfo): number {
+    const elapsedHours = info.uptimeSeconds / 3600;
+    if (elapsedHours < 0.001) return 0;
+    return Math.round(info.sharesAccepted / elapsedHours);
+  }
 }
