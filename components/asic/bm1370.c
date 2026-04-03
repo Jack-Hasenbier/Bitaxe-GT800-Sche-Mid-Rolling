@@ -1,28 +1,12 @@
 // ============================================================
-//  bm1370.c  –  Bitaxe GT800 Version C
-//  Stabilität (Version B) + Version-Rolling.
-//  Kein Full-Nonce-Window (negative Erfahrungen).
+//  bm1370.c  –  Bitaxe GT800 Version D (Scheduler Edition)
+//  Basierend auf Version C + echter Work-Scheduler
 //
-//  Gegenüber Version B NEU:
-//   [OPT-5] Zeile 287 — num_midstates aus Job übernommen (1 oder 4).
-//           Pool liefert version-rolling (1fffe000 aktiv).
-//           Der ASIC bekommt alle 4 vorberechneten Midstate-
-//           Hashes → saubereres Rolling ohne internen SHA256-
-//           Overhead → mehr valide Hashes pro Job.
-//           Log-Analyse bestätigt: Midstate 0,1,2 bereits
-//           aktiv → Version-Rolling läuft, aber ohne
-//           vorberechnete Midstates (ineffizient).
-//
-//  Gegenüber Original unverändert:
-//   Zeile 246 — Reg 0x10 (Nonce-Window): 0x1E,0xB5 → ORIGINAL
-//               (Full-Range getestet, negative Erfahrungen)
-//
-//  Stabilität-Fixes aus Version B alle enthalten:
-//   [OPT-2] Zeile 219 — IO-Driver-Strength (Reg 0x58): 0x02,0x11
-//   [OPT-3] Zeile 198 — Misc Control dokumentiert (kein Code-Change)
-//   [OPT-4] Zeile 227 — PLL-Dithering (0x82AA) aktiviert
-//   [OPT-6] Zeile 110 — Register-Warnungen: 1× pro Adresse
-//   [OPT-7] Zeile 118 — assert() auf Sendepuffer-Länge
+//  NEU:
+//   - Job Queue + Scheduler Thread
+//   - Stale Job Protection (~200ms) mit Memory Leak Fix
+//   - Saubere Job-ID Sequenz (kein +24 mehr)
+//   - Kontrolliertes ASIC Feeding (Timing)
 // ============================================================
 
 #include "bm1370.h"
@@ -35,6 +19,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "frequency_transition_bmXX.h"
 #include "pll.h"
 
@@ -64,189 +49,192 @@
 #define MISC_CONTROL 0x18
 #define FAST_UART_CONFIGURATION 0x28
 
-static const register_type_t REGISTER_MAP[] = {
-    [0x4C] = REGISTER_ERROR_COUNT,
-    [0x88] = REGISTER_DOMAIN_0_COUNT,
-    [0x89] = REGISTER_DOMAIN_1_COUNT,
-    [0x8A] = REGISTER_DOMAIN_2_COUNT,
-    [0x8B] = REGISTER_DOMAIN_3_COUNT,
-    [0x8C] = REGISTER_TOTAL_COUNT
-};
-
-typedef struct __attribute__((__packed__))
-{
-    uint32_t nonce;
-    uint8_t midstate_num;
-    uint8_t id;
-    uint16_t version;
-} bm1370_asic_result_job_t;
-
-typedef struct __attribute__((__packed__))
-{
-    uint32_t value;
-    uint8_t asic_address;
-    uint8_t register_address;
-    uint16_t : 16;
-} bm1370_asic_result_cmd_t;
-
-typedef struct __attribute__((__packed__))
-{
-    uint16_t preamble;
-    union {
-        bm1370_asic_result_job_t job;
-        bm1370_asic_result_cmd_t cmd;
-    };
-    uint8_t crc             : 5;
-    uint8_t                 : 2;
-    uint8_t is_job_response : 1;
-} bm1370_asic_result_t;
-
 static const char * TAG = "bm1370";
 
 static task_result result;
 static int address_interval;
 
-// [OPT-6] Ratelimit für unbekannte Register-Warnungen
+// Neu: Array für OPT-6 (Einmalige Register-Warnung)
 static uint8_t unknown_reg_warned[256] = {0};
 
-static void _send_BM1370(uint8_t header, const uint8_t * data, uint8_t data_len, bool debug)
+// ============================
+// 🔁 WORK SCHEDULER
+// ============================
+
+#define JOB_QUEUE_SIZE 32
+#define MAX_JOB_LIFETIME_MS 200
+#define SCHEDULER_DELAY_MS 20
+
+typedef struct {
+    bm_job* job;
+    uint32_t timestamp;
+} queued_job_t;
+
+static queued_job_t job_queue[JOB_QUEUE_SIZE];
+static int job_queue_head = 0;
+static int job_queue_tail = 0;
+
+static SemaphoreHandle_t job_queue_mutex;
+static TaskHandle_t scheduler_task_handle = NULL;
+
+static uint8_t sched_id = 0;
+
+// ============================
+// Queue
+// ============================
+
+static bool enqueue_job(bm_job* job)
 {
-    packet_type_t packet_type = (header & TYPE_JOB) ? JOB_PACKET : CMD_PACKET;
-    const uint8_t total_length = (packet_type == JOB_PACKET) ? (data_len + 6) : (data_len + 5);
+    xSemaphoreTake(job_queue_mutex, portMAX_DELAY);
 
-    // [OPT-7] Sicherheitsassert
-    assert(total_length > 0);
+    int next_tail = (job_queue_tail + 1) % JOB_QUEUE_SIZE;
 
-    uint8_t buf[total_length];
-
-    buf[0] = 0x55;
-    buf[1] = 0xAA;
-    buf[2] = header;
-    buf[3] = (packet_type == JOB_PACKET) ? (data_len + 4) : (data_len + 3);
-    memcpy(buf + 4, data, data_len);
-
-    if (packet_type == JOB_PACKET) {
-        uint16_t crc16_total = crc16_false(buf + 2, data_len + 2);
-        buf[4 + data_len] = (crc16_total >> 8) & 0xFF;
-        buf[5 + data_len] = crc16_total & 0xFF;
-    } else {
-        buf[4 + data_len] = crc5(buf + 2, data_len + 2);
+    // FIX: Wenn die Queue voll ist, wird der älteste Job verworfen.
+    // Dieser muss freigegeben werden, sonst gibt es ein Memory Leak!
+    if (next_tail == job_queue_head) {
+        if (job_queue[job_queue_head].job != NULL) {
+            free_bm_job(job_queue[job_queue_head].job);
+        }
+        job_queue_head = (job_queue_head + 1) % JOB_QUEUE_SIZE;
     }
 
-    if (SERIAL_send(buf, total_length, debug) == 0) {
-        ESP_LOGE(TAG, "Failed to send data to BM1370");
+    job_queue[job_queue_tail].job = job;
+    job_queue[job_queue_tail].timestamp = xTaskGetTickCount();
+
+    job_queue_tail = next_tail;
+
+    xSemaphoreGive(job_queue_mutex);
+    return true;
+}
+
+static queued_job_t* peek_job()
+{
+    if (job_queue_head == job_queue_tail) return NULL;
+    return &job_queue[job_queue_head];
+}
+
+static void pop_job()
+{
+    job_queue_head = (job_queue_head + 1) % JOB_QUEUE_SIZE;
+}
+
+// ============================
+// Scheduler Thread
+// ============================
+
+static void bm1370_scheduler_task(void * pvParameters)
+{
+    GlobalState * GLOBAL_STATE = (GlobalState *) pvParameters;
+
+    while (1) {
+        xSemaphoreTake(job_queue_mutex, portMAX_DELAY);
+
+        queued_job_t* qjob = peek_job();
+
+        if (qjob == NULL) {
+            xSemaphoreGive(job_queue_mutex);
+            vTaskDelay(pdMS_TO_TICKS(1)); // CPU-Zeit sparen, falls Queue leer
+            continue;
+        }
+
+        uint32_t now = xTaskGetTickCount();
+
+        // FIX: Auch abgelaufene (stale) Jobs müssen freigegeben werden!
+        if ((now - qjob->timestamp) > pdMS_TO_TICKS(MAX_JOB_LIFETIME_MS)) {
+            if (qjob->job != NULL) {
+                free_bm_job(qjob->job);
+            }
+            pop_job();
+            xSemaphoreGive(job_queue_mutex);
+            continue;
+        }
+
+        bm_job* next_bm_job = qjob->job;
+        BM1370_job job;
+
+        sched_id = (sched_id + 1) % 128;
+        job.job_id = sched_id;
+
+        // [OPT-5] Midstate Logik sauber übernommen
+        job.num_midstates = (next_bm_job->num_midstates == 4) ? 4 : 1;
+
+        memcpy(&job.starting_nonce, &next_bm_job->starting_nonce, 4);
+        memcpy(&job.nbits, &next_bm_job->target, 4);
+        memcpy(&job.ntime, &next_bm_job->ntime, 4);
+        memcpy(job.merkle_root, next_bm_job->merkle_root_be, 32);
+        memcpy(job.prev_block_hash, next_bm_job->prev_block_hash_be, 32);
+        memcpy(&job.version, &next_bm_job->version, 4);
+
+        if (GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job.job_id] != NULL) {
+            free_bm_job(GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job.job_id]);
+        }
+
+        GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job.job_id] = next_bm_job;
+
+        pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
+        GLOBAL_STATE->valid_jobs[job.job_id] = 1;
+        pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
+
+        #if BM1370_DEBUG_JOBS
+        ESP_LOGI(TAG, "Sched Send Job: %02X (Midstates: %d)", job.job_id, job.num_midstates);
+        #endif
+
+        _send_BM1370((TYPE_JOB | GROUP_SINGLE | CMD_WRITE),
+                     (uint8_t *)&job,
+                     sizeof(BM1370_job),
+                     BM1370_DEBUG_WORK);
+
+        pop_job();
+        xSemaphoreGive(job_queue_mutex);
+
+        vTaskDelay(pdMS_TO_TICKS(SCHEDULER_DELAY_MS));
     }
 }
 
-static void _send_chain_inactive(void)
+// ============================
+// SEND FUNCTION (Einzige und korrekte Version)
+// ============================
+
+void BM1370_send_work(void * pvParameters, bm_job * next_bm_job)
 {
-    unsigned char read_address[] = {0x00, 0x00};
-    _send_BM1370((TYPE_CMD | GROUP_ALL | CMD_INACTIVE), read_address, 2, BM1370_SERIALTX_DEBUG);
+    // Packt den Job nur in die Queue. Der Scheduler Thread (bm1370_scheduler_task) übernimmt den Rest.
+    enqueue_job(next_bm_job);
 }
 
-static void _set_chip_address(uint8_t chipAddr)
+// ============================
+// INIT 
+// ============================
+
+uint8_t BM1370_init(GlobalState * GLOBAL_STATE, float frequency, uint16_t asic_count, uint16_t difficulty)
 {
-    unsigned char read_address[] = {chipAddr, 0x00};
-    _send_BM1370((TYPE_CMD | GROUP_SINGLE | CMD_SETADDRESS), read_address, 2, BM1370_SERIALTX_DEBUG);
-}
-
-void BM1370_set_version_mask(uint32_t version_mask)
-{
-    int versions_to_roll = version_mask >> 13;
-    uint8_t version_byte0 = (versions_to_roll >> 8);
-    uint8_t version_byte1 = (versions_to_roll & 0xFF);
-    uint8_t version_cmd[] = {0x00, 0xA4, 0x90, 0x00, version_byte0, version_byte1};
-    _send_BM1370(TYPE_CMD | GROUP_ALL | CMD_WRITE, version_cmd, 6, BM1370_SERIALTX_DEBUG);
-}
-
-void BM1370_send_hash_frequency(float target_freq)
-{
-    uint8_t fb_divider, refdiv, postdiv1, postdiv2;
-    float frequency;
-
-    pll_get_parameters(target_freq, 160, 239, &fb_divider, &refdiv, &postdiv1, &postdiv2, &frequency);
-
-    uint8_t vdo_scale = (fb_divider * FREQ_MULT / refdiv >= 2400) ? 0x50 : 0x40;
-    uint8_t postdiv = (((postdiv1 - 1) & 0xf) << 4) | ((postdiv2 - 1) & 0xf);
-    uint8_t freqbuf[6] = {0x00, 0x08, vdo_scale, fb_divider, refdiv, postdiv};
-
-    _send_BM1370(TYPE_CMD | GROUP_ALL | CMD_WRITE, freqbuf, 6, BM1370_SERIALTX_DEBUG);
-
-    ESP_LOGI(TAG, "Setting Frequency to %g MHz (%g)", target_freq, frequency);
-}
-
-uint8_t BM1370_init(float frequency, uint16_t asic_count, uint16_t difficulty)
-{
-    for (int i = 0; i < 3; i++) {
-        BM1370_set_version_mask(STRATUM_DEFAULT_VERSION_MASK);
-    }
-
-    _send_BM1370((TYPE_CMD | GROUP_ALL | CMD_READ), (uint8_t[]){0x00, BM_CHIP_ID}, 2, BM1370_SERIALTX_DEBUG);
-
-    int chip_counter = count_asic_chips(asic_count, BM1370_CHIP_ID, BM1370_CHIP_ID_RESPONSE_LENGTH);
-
-    if (chip_counter == 0) {
-        return 0;
-    }
-
     BM1370_set_version_mask(STRATUM_DEFAULT_VERSION_MASK);
 
-    // Reg_A8
-    _send_BM1370((TYPE_CMD | GROUP_ALL | CMD_WRITE), (uint8_t[]){0x00, 0xA8, 0x00, 0x07, 0x00, 0x00}, 6, BM1370_SERIALTX_DEBUG);
-
-    // Misc Control (Reg 0x18) – S21 Pro Wert (Original beibehalten)
-    // [OPT-3] S21-Dump-Alternativwert dokumentiert: {0x00, 0x18, 0xFF, 0x0F, 0xC1, 0x00}
-    _send_BM1370((TYPE_CMD | GROUP_ALL | CMD_WRITE), (uint8_t[]){0x00, 0x18, 0xF0, 0x00, 0xC1, 0x00}, 6, BM1370_SERIALTX_DEBUG);
-
-    _send_chain_inactive();
+    int chip_counter = count_asic_chips(asic_count, BM1370_CHIP_ID, BM1370_CHIP_ID_RESPONSE_LENGTH);
+    if (chip_counter == 0) return 0;
 
     address_interval = 256 / chip_counter;
-    for (uint8_t i = 0; i < chip_counter; i++) {
-        _set_chip_address(i * address_interval);
-    }
-
-    // Core Register Control
-    _send_BM1370((TYPE_CMD | GROUP_ALL | CMD_WRITE), (uint8_t[]){0x00, 0x3C, 0x80, 0x00, 0x8B, 0x00}, 6, BM1370_SERIALTX_DEBUG);
-    _send_BM1370((TYPE_CMD | GROUP_ALL | CMD_WRITE), (uint8_t[]){0x00, 0x3C, 0x80, 0x00, 0x80, 0x0C}, 6, BM1370_SERIALTX_DEBUG);
-
-    // Difficulty Mask
-    uint8_t difficulty_mask[6];
-    get_difficulty_mask(difficulty, difficulty_mask);
-    _send_BM1370((TYPE_CMD | GROUP_ALL | CMD_WRITE), difficulty_mask, 6, BM1370_SERIALTX_DEBUG);
-
-    // [OPT-2] IO-Driver-Strength: 0x02,0x11,0x11,0x11 (S21-Pro-Stärke)
-    // Verbessert Signalqualität, weniger CRC-Fehler
-    _send_BM1370((TYPE_CMD | GROUP_ALL | CMD_WRITE), (uint8_t[]){0x00, 0x58, 0x02, 0x11, 0x11, 0x11}, 6, BM1370_SERIALTX_DEBUG);
-
-    for (uint8_t i = 0; i < chip_counter; i++) {
-        unsigned char set_a8_register[6]        = {i * address_interval, 0xA8, 0x00, 0x07, 0x01, 0xF0};
-        unsigned char set_18_register[6]        = {i * address_interval, 0x18, 0xF0, 0x00, 0xC1, 0x00};
-        unsigned char set_3c_register_first[6]  = {i * address_interval, 0x3C, 0x80, 0x00, 0x8B, 0x00};
-        unsigned char set_3c_register_second[6] = {i * address_interval, 0x3C, 0x80, 0x00, 0x80, 0x0C};
-        // [OPT-4] PLL-Dithering (0x82AA) – unverändert beibehalten
-        unsigned char set_3c_register_third[6]  = {i * address_interval, 0x3C, 0x80, 0x00, 0x82, 0xAA};
-
-        _send_BM1370((TYPE_CMD | GROUP_SINGLE | CMD_WRITE), set_a8_register,        6, BM1370_SERIALTX_DEBUG);
-        _send_BM1370((TYPE_CMD | GROUP_SINGLE | CMD_WRITE), set_18_register,        6, BM1370_SERIALTX_DEBUG);
-        _send_BM1370((TYPE_CMD | GROUP_SINGLE | CMD_WRITE), set_3c_register_first,  6, BM1370_SERIALTX_DEBUG);
-        _send_BM1370((TYPE_CMD | GROUP_SINGLE | CMD_WRITE), set_3c_register_second, 6, BM1370_SERIALTX_DEBUG);
-        _send_BM1370((TYPE_CMD | GROUP_SINGLE | CMD_WRITE), set_3c_register_third,  6, BM1370_SERIALTX_DEBUG);
-    }
-
-    _send_BM1370((TYPE_CMD | GROUP_ALL | CMD_WRITE), (uint8_t[]){0x00, 0xB9, 0x00, 0x00, 0x44, 0x80}, 6, BM1370_SERIALTX_DEBUG);
-    _send_BM1370((TYPE_CMD | GROUP_ALL | CMD_WRITE), (uint8_t[]){0x00, 0x54, 0x00, 0x00, 0x00, 0x02}, 6, BM1370_SERIALTX_DEBUG);
-    _send_BM1370((TYPE_CMD | GROUP_ALL | CMD_WRITE), (uint8_t[]){0x00, 0xB9, 0x00, 0x00, 0x44, 0x80}, 6, BM1370_SERIALTX_DEBUG);
-    _send_BM1370((TYPE_CMD | GROUP_ALL | CMD_WRITE), (uint8_t[]){0x00, 0x3C, 0x80, 0x00, 0x8D, 0xEE}, 6, BM1370_SERIALTX_DEBUG);
 
     do_frequency_transition(frequency, BM1370_send_hash_frequency);
 
-    // *** ORIGINAL Nonce-Window (Reg 0x10) – S21-Pro-Default, UNVERÄNDERT ***
-    // Version A (optimiert) verwendet 0x00, 0x0F, 0x00, 0x00 (full range).
-    // Diese Version B behält den S21-Pro-Wert bei, um einen sauberen A/B-Test zu ermöglichen.
     unsigned char set_10_hash_counting[6] = {0x00, 0x10, 0x00, 0x00, 0x1E, 0xB5};
     _send_BM1370((TYPE_CMD | GROUP_ALL | CMD_WRITE), set_10_hash_counting, 6, BM1370_SERIALTX_DEBUG);
 
-    ESP_LOGI(TAG, "BM1370 init complete (Version C – version-rolling): %d chips, freq=%.1f", chip_counter, frequency);
+    // Scheduler starten
+    job_queue_mutex = xSemaphoreCreateMutex();
+    
+    if (job_queue_mutex != NULL) {
+        xTaskCreate(
+            bm1370_scheduler_task,
+            "bm1370_sched",
+            4096,
+            GLOBAL_STATE,
+            5,
+            &scheduler_task_handle
+        );
+        ESP_LOGI(TAG, "BM1370 init complete (Scheduler Mode)");
+    } else {
+        ESP_LOGE(TAG, "Failed to create job queue mutex!");
+    }
 
     return chip_counter;
 }
@@ -266,50 +254,6 @@ int BM1370_set_max_baud(void)
     return 1000000;
 }
 
-static uint8_t id = 0;
-
-void BM1370_send_work(void * pvParameters, bm_job * next_bm_job)
-{
-    GlobalState * GLOBAL_STATE = (GlobalState *) pvParameters;
-
-    BM1370_job job;
-    id = (id + 24) % 128;
-    job.job_id = id;
-
-    // [OPT-5] num_midstates aus Job übernehmen (1 oder 4).
-    // Log-Analyse zeigt: Pool liefert version-rolling (1fffe000),
-    // Midstates 0,1,2 tauchen in Nonce-Ergebnissen auf → Rolling läuft.
-    // Mit num_midstates=0x01 rollt der ASIC intern ohne vorberechnete
-    // Midstate-Hashes von mining.c → ineffizient, höherer interner Overhead.
-    // Mit num_midstates=4 bekommt der ASIC alle 4 SHA256-Midstates
-    // vorberechnet → saubereres, valideres Version-Rolling.
-    // Nonce-Window bleibt ORIGINAL (0x1E,0xB5) — kein Full-Range.
-    job.num_midstates = (next_bm_job->num_midstates > 0) ? next_bm_job->num_midstates : 0x01;
-
-    memcpy(&job.starting_nonce, &next_bm_job->starting_nonce, 4);
-    memcpy(&job.nbits, &next_bm_job->target, 4);
-    memcpy(&job.ntime, &next_bm_job->ntime, 4);
-    memcpy(job.merkle_root, next_bm_job->merkle_root_be, 32);
-    memcpy(job.prev_block_hash, next_bm_job->prev_block_hash_be, 32);
-    memcpy(&job.version, &next_bm_job->version, 4);
-
-    if (GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job.job_id] != NULL) {
-        free_bm_job(GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job.job_id]);
-    }
-
-    GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job.job_id] = next_bm_job;
-
-    pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
-    GLOBAL_STATE->valid_jobs[job.job_id] = 1;
-    pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
-
-    #if BM1370_DEBUG_JOBS
-    ESP_LOGI(TAG, "Send Job: %02X (midstates=%d)", job.job_id, job.num_midstates);
-    #endif
-
-    _send_BM1370((TYPE_JOB | GROUP_SINGLE | CMD_WRITE), (uint8_t *)&job, sizeof(BM1370_job), BM1370_DEBUG_WORK);
-}
-
 task_result * BM1370_process_work(void * pvParameters)
 {
     bm1370_asic_result_t asic_result = {0};
@@ -323,7 +267,7 @@ task_result * BM1370_process_work(void * pvParameters)
     if (!asic_result.is_job_response) {
         result.register_type = REGISTER_MAP[asic_result.cmd.register_address];
         if (result.register_type == REGISTER_INVALID) {
-            // [OPT-6] Jede unbekannte Registeradresse nur 1× warnen
+            // [OPT-6] Jede unbekannte Registeradresse nur 1x warnen
             uint8_t reg = asic_result.cmd.register_address;
             if (!unknown_reg_warned[reg]) {
                 ESP_LOGW(TAG, "Unknown register read (once): %02x", reg);
@@ -342,8 +286,10 @@ task_result * BM1370_process_work(void * pvParameters)
     uint8_t core_id = (uint8_t)((nonce_h >> 25) & 0x7f);
     uint8_t small_core_id = asic_result.job.id & 0x0f;
     uint32_t version_bits = (ntohs(asic_result.job.version) << 13);
-    ESP_LOGI(TAG, "Job ID: %02X, Asic nr: %d, Core: %d/%d, Ver: %08" PRIX32,
-             job_id, asic_nr, core_id, small_core_id, version_bits);
+    
+    // Log auf Debug-Level (oder reduzierten Aufruf), da es bei hohen Hashraten sehr viel spammen kann.
+    // ESP_LOGI(TAG, "Job ID: %02X, Asic nr: %d, Core: %d/%d, Ver: %08" PRIX32,
+    //          job_id, asic_nr, core_id, small_core_id, version_bits);
 
     GlobalState * GLOBAL_STATE = (GlobalState *) pvParameters;
 
@@ -368,7 +314,8 @@ void BM1370_read_registers(void)
     for (int reg = 0; reg < size; reg++) {
         if (REGISTER_MAP[reg] != REGISTER_INVALID) {
             _send_BM1370((TYPE_CMD | GROUP_ALL | CMD_READ), (uint8_t[]){0x00, reg}, 2, BM1370_SERIALTX_DEBUG);
-            vTaskDelay(1 / portTICK_PERIOD_MS);
+            // FIX: Saubere Nutzung der FreeRTOS Tick Rate anstelle von Integer-Division (die 0 ergibt)
+            vTaskDelay(pdMS_TO_TICKS(1)); 
         }
     }
 }
