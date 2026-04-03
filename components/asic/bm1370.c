@@ -23,12 +23,7 @@
 //   [OPT-4] Zeile 227 — PLL-Dithering (0x82AA) aktiviert
 //   [OPT-6] Zeile 110 — Register-Warnungen: 1× pro Adresse
 //   [OPT-7] Zeile 118 — assert() auf Sendepuffer-Länge
-//   [OPT-8] Zeile 303 - Nonce-Splitting für 2 ASICs
-    // Wir teilen den 32-Bit Suchraum (0x00000000 bis 0xFFFFFFFF) auf.
-    // ASIC 0 startet bei der vom Pool vorgegebenen Nonce (meist 0).
-    // ASIC 1 startet genau in der Mitte des Suchraums (Offset 0x80000000).
 // ============================================================
-
 
 #include "bm1370.h"
 
@@ -281,48 +276,38 @@ void BM1370_send_work(void * pvParameters, bm_job * next_bm_job)
     id = (id + 24) % 128;
     job.job_id = id;
 
-    // [OPT-5] num_midstates aus Job übernommen (1 oder 4)
+    // [OPT-5] num_midstates aus Job übernehmen (1 oder 4).
+    // Log-Analyse zeigt: Pool liefert version-rolling (1fffe000),
+    // Midstates 0,1,2 tauchen in Nonce-Ergebnissen auf → Rolling läuft.
+    // Mit num_midstates=0x01 rollt der ASIC intern ohne vorberechnete
+    // Midstate-Hashes von mining.c → ineffizient, höherer interner Overhead.
+    // Mit num_midstates=4 bekommt der ASIC alle 4 SHA256-Midstates
+    // vorberechnet → saubereres, valideres Version-Rolling.
+    // Nonce-Window bleibt ORIGINAL (0x1E,0xB5) — kein Full-Range.
     job.num_midstates = (next_bm_job->num_midstates > 0) ? next_bm_job->num_midstates : 0x01;
 
-    // Grundwerte kopieren
+    memcpy(&job.starting_nonce, &next_bm_job->starting_nonce, 4);
     memcpy(&job.nbits, &next_bm_job->target, 4);
     memcpy(&job.ntime, &next_bm_job->ntime, 4);
     memcpy(job.merkle_root, next_bm_job->merkle_root_be, 32);
     memcpy(job.prev_block_hash, next_bm_job->prev_block_hash_be, 32);
     memcpy(&job.version, &next_bm_job->version, 4);
 
-    // Job im Global State registrieren
     if (GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job.job_id] != NULL) {
         free_bm_job(GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job.job_id]);
     }
+
     GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job.job_id] = next_bm_job;
 
     pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
     GLOBAL_STATE->valid_jobs[job.job_id] = 1;
     pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
 
-    // [OPT-8] Nonce-Splitting für 2 ASICs
-    // Wir teilen den 32-Bit Suchraum (0x00000000 bis 0xFFFFFFFF) auf.
-    // ASIC 0 startet bei der vom Pool vorgegebenen Nonce (meist 0).
-    // ASIC 1 startet genau in der Mitte des Suchraums (Offset 0x80000000).
-    
- // [OPT-8] Nonce-Splitting für 2 ASICs (KORRIGIERTE VERSION)
-    uint32_t base_nonce;
-    memcpy(&base_nonce, &next_bm_job->starting_nonce, 4);
+    #if BM1370_DEBUG_JOBS
+    ESP_LOGI(TAG, "Send Job: %02X (midstates=%d)", job.job_id, job.num_midstates);
+    #endif
 
-    for (uint8_t a = 0; a < 2; a++) {
-        uint32_t current_nonce = base_nonce + (a * 0x80000000);
-        
-        // Nutze memcpy anstatt =, da starting_nonce ein Array ist
-        memcpy(&job.starting_nonce, &current_nonce, 4);
-        
-        #if BM1370_DEBUG_JOBS
-        ESP_LOGI(TAG, "Send Job: %02X to ASIC %d (midstates=%d, start_nonce=%08X)", 
-                 job.job_id, a, job.num_midstates, current_nonce);
-        #endif
-
-        _send_BM1370((TYPE_JOB | GROUP_SINGLE | CMD_WRITE), (uint8_t *)&job, sizeof(BM1370_job), BM1370_DEBUG_WORK);
-    }
+    _send_BM1370((TYPE_JOB | GROUP_SINGLE | CMD_WRITE), (uint8_t *)&job, sizeof(BM1370_job), BM1370_DEBUG_WORK);
 }
 
 task_result * BM1370_process_work(void * pvParameters)
