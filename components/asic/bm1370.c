@@ -1,18 +1,28 @@
 // ============================================================
-//  bm1370.c  –  Bitaxe GT800 KONSERVATIV (Version B)
-//  NUR Stabilitäts-Fixes, KEINE Hashrate-Änderungen.
+//  bm1370.c  –  Bitaxe GT800 Version C
+//  Stabilität (Version B) + Version-Rolling.
+//  Kein Full-Nonce-Window (negative Erfahrungen).
 //
-//  Gegenüber Original geändert:
-//   [OPT-2] IO-Driver-Strength (Reg 0x58): 0x00,0x01 → 0x02,0x11
-//           Stärkere Ausgangssignale, weniger CRC-Fehler.
-//   [OPT-3] Misc Control Alternativwert dokumentiert (kein Code-Change).
-//   [OPT-4] PLL-Dithering (0x82AA) bleibt aktiviert (unverändert).
-//   [OPT-6] Unbekannte Register-Warnungen: 1× pro Adresse (kein Log-Spam).
-//   [OPT-7] assert() auf Sendepuffer-Länge.
+//  Gegenüber Version B NEU:
+//   [OPT-5] Zeile 287 — num_midstates aus Job übernommen (1 oder 4).
+//           Pool liefert version-rolling (1fffe000 aktiv).
+//           Der ASIC bekommt alle 4 vorberechneten Midstate-
+//           Hashes → saubereres Rolling ohne internen SHA256-
+//           Overhead → mehr valide Hashes pro Job.
+//           Log-Analyse bestätigt: Midstate 0,1,2 bereits
+//           aktiv → Version-Rolling läuft, aber ohne
+//           vorberechnete Midstates (ineffizient).
 //
-//  Gegenüber Original UNVERÄNDERT (Original-Werte beibehalten):
-//   Reg 0x10 (Nonce-Window): S21-Pro-Wert 0x1E,0xB5 → ORIGINAL
-//   job.num_midstates: immer 0x01                    → ORIGINAL
+//  Gegenüber Original unverändert:
+//   Zeile 246 — Reg 0x10 (Nonce-Window): 0x1E,0xB5 → ORIGINAL
+//               (Full-Range getestet, negative Erfahrungen)
+//
+//  Stabilität-Fixes aus Version B alle enthalten:
+//   [OPT-2] Zeile 219 — IO-Driver-Strength (Reg 0x58): 0x02,0x11
+//   [OPT-3] Zeile 198 — Misc Control dokumentiert (kein Code-Change)
+//   [OPT-4] Zeile 227 — PLL-Dithering (0x82AA) aktiviert
+//   [OPT-6] Zeile 110 — Register-Warnungen: 1× pro Adresse
+//   [OPT-7] Zeile 118 — assert() auf Sendepuffer-Länge
 // ============================================================
 
 #include "bm1370.h"
@@ -236,7 +246,7 @@ uint8_t BM1370_init(float frequency, uint16_t asic_count, uint16_t difficulty)
     unsigned char set_10_hash_counting[6] = {0x00, 0x10, 0x00, 0x00, 0x1E, 0xB5};
     _send_BM1370((TYPE_CMD | GROUP_ALL | CMD_WRITE), set_10_hash_counting, 6, BM1370_SERIALTX_DEBUG);
 
-    ESP_LOGI(TAG, "BM1370 init complete (Version B – conservative): %d chips, freq=%.1f", chip_counter, frequency);
+    ESP_LOGI(TAG, "BM1370 init complete (Version C – version-rolling): %d chips, freq=%.1f", chip_counter, frequency);
 
     return chip_counter;
 }
@@ -266,10 +276,15 @@ void BM1370_send_work(void * pvParameters, bm_job * next_bm_job)
     id = (id + 24) % 128;
     job.job_id = id;
 
-    // *** ORIGINAL num_midstates = 0x01 – UNVERÄNDERT ***
-    // Version A (optimiert) übergibt next_bm_job->num_midstates (1 oder 4).
-    // Diese Version B sendet immer 0x01 für einen sauberen A/B-Test.
-    job.num_midstates = 0x01;
+    // [OPT-5] num_midstates aus Job übernehmen (1 oder 4).
+    // Log-Analyse zeigt: Pool liefert version-rolling (1fffe000),
+    // Midstates 0,1,2 tauchen in Nonce-Ergebnissen auf → Rolling läuft.
+    // Mit num_midstates=0x01 rollt der ASIC intern ohne vorberechnete
+    // Midstate-Hashes von mining.c → ineffizient, höherer interner Overhead.
+    // Mit num_midstates=4 bekommt der ASIC alle 4 SHA256-Midstates
+    // vorberechnet → saubereres, valideres Version-Rolling.
+    // Nonce-Window bleibt ORIGINAL (0x1E,0xB5) — kein Full-Range.
+    job.num_midstates = (next_bm_job->num_midstates > 0) ? next_bm_job->num_midstates : 0x01;
 
     memcpy(&job.starting_nonce, &next_bm_job->starting_nonce, 4);
     memcpy(&job.nbits, &next_bm_job->target, 4);
@@ -289,7 +304,7 @@ void BM1370_send_work(void * pvParameters, bm_job * next_bm_job)
     pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
 
     #if BM1370_DEBUG_JOBS
-    ESP_LOGI(TAG, "Send Job: %02X", job.job_id);
+    ESP_LOGI(TAG, "Send Job: %02X (midstates=%d)", job.job_id, job.num_midstates);
     #endif
 
     _send_BM1370((TYPE_JOB | GROUP_SINGLE | CMD_WRITE), (uint8_t *)&job, sizeof(BM1370_job), BM1370_DEBUG_WORK);
