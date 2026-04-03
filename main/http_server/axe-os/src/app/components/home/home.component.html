@@ -110,6 +110,10 @@
                     <span class="text-green-400 font-medium">{{ getSharesPerHour(info) | number: '1.0-0' }}</span>
                     <span class="text-500"> shares/h</span>
                 </div>
+                <div class="mt-1">
+                    <span class="text-green-400 font-medium">{{ getSharesPerHour(info) * 24 | number: '1.0-0' }}</span>
+                    <span class="text-500"> shares/24h</span>
+                </div>
             </div>
         </div>
 
