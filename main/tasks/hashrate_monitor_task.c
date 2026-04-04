@@ -151,6 +151,17 @@ void check_hashrate_anomaly(void *pvParameters, float current_hashrate)
         }
 
         lowHashrateCount = 0;
+
+        // [FIX-6] highest_hashrate nach Recovery zurücksetzen.
+        // highest_hashrate ist statisch und wird nie verringert.
+        // Nach Recovery baut der ASIC die Hashrate schrittweise auf
+        // (z.B. 0 → 200 → 800 → 2897 GH/s). Ohne Reset gilt sofort:
+        // current(200) < highest(2897) → Anomalie-Zähler läuft hoch
+        // → nach 3 Zyklen neues Reinitiate → Reinitiate-Schleife.
+        // Mit Reset: highest startet bei 0, kein false-positive während
+        // der Aufwärmphase nach Recovery.
+        highest_hashrate = 0.0f;
+        ESP_LOGI(TAG, "highest_hashrate reset after recovery");
     }
 }
 
@@ -166,8 +177,8 @@ void hashrate_monitor_task(void *pvParameters)
     float expected_hashrate = GLOBAL_STATE->POWER_MANAGEMENT_MODULE.expected_hashrate;
 
     // Laufzeit-Berechnung des unteren Schwellwerts
-    // GT800 (2 ASICs, 4 Domains): ergibt 0.75 → Trigger bei 600 GH/s, hash_domains von 2.0f gesetzt auf 3.0f
-    lowerThresholdHashratePercent = 1.0f - ((expected_hashrate / asic_count / hash_domains * 3.0f) / expected_hashrate);
+    // GT800 (2 ASICs, 4 Domains): ergibt 0.75 → Trigger bei 600 GH/s
+    lowerThresholdHashratePercent = 1.0f - ((expected_hashrate / asic_count / hash_domains * 2.0f) / expected_hashrate);
 
     // [FIX-2] NaN/Inf-Schutz
     // Wenn expected_hashrate beim Task-Start noch 0.0 ist:

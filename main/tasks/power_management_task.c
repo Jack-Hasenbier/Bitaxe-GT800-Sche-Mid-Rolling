@@ -205,7 +205,10 @@ void POWER_MANAGEMENT_task(void * pvParameters)
             if (chip_count > 0) {
                 // Frequency reduction will now be applied by normal power management loop
                 nvs_config_set_bool(NVS_CONFIG_OVERHEAT_MODE, false);
-                ESP_LOGI(TAG, "Resuming normal operation. Reduced frequency (%.0f MHz) will be applied automatically.", last_known_asic_frequency);
+                // [FIX-4/LOG] Log-Statement korrigiert: keine Frequenzreduzierung mehr.
+                // Original referenzierte reduced_asic_frequency die nicht mehr in NVS geschrieben wird.
+                ESP_LOGI(TAG, "Resuming normal operation at %.0f MHz / %umV (original NVS values preserved).",
+                         last_known_asic_frequency, last_known_asic_voltage);
             }
         }
 

@@ -58,6 +58,7 @@ export class SystemService {
         sharesRejected: 0,
         sharesRejectedReasons: [],
         uptimeSeconds: 38,
+        luckPercent: 142.5,
         smallCoreCount: 672,
         ASICModel: "BM1366",
         stratumURL: "public-pool.io",

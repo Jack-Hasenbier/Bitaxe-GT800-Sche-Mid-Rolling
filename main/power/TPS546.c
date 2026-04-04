@@ -26,6 +26,11 @@
 
 static const char *TAG = "TPS546";
 
+// [FIX-5] fault_count als file-scope static (statt local static in check_status).
+// File-scope ermöglicht Reset in TPS546_clear_faults() nach Recovery.
+// Local static überlebt Recovery → nach fault_count=2 reicht 1 Fault für power_fault.
+static uint8_t tps546_fault_count = 0;
+
 static uint8_t DEVICE_ID_TPS546D24A[] = {0x54, 0x49, 0x54, 0x6D, 0x24, 0x41};
 static uint8_t DEVICE_ID_TPS546D24S[] = {0x54, 0x49, 0x54, 0x6D, 0x24, 0x62};
 // static uint8_t DEVICE_ID_TPS546B24A[] = {0x54, 0x49, 0x54, 0x6B, 0x24, 0x41};
@@ -481,6 +486,13 @@ esp_err_t TPS546_clear_faults(void) {
     // acknowledge the SMBus fault to reset the SMBALERT pin
     //ESP_RETURN_ON_ERROR(smb_clear_alert(), TAG, "Failed to clear alert"); //this doesn't seem to work?
 
+    // [FIX-5] Debounce-Zähler zurücksetzen.
+    // Nach ASIC-Recovery oder nach aufgelöstem Fault: tps546_fault_count
+    // auf 0 setzen. Ohne diesen Reset würde ein nach der Recovery
+    // auftretender einzelner Fault sofort power_fault auslösen wenn
+    // der Zähler noch bei 2 stand.
+    tps546_fault_count = 0;
+
     return ESP_OK;
 }
 
@@ -755,7 +767,8 @@ esp_err_t TPS546_check_status(GlobalState * GLOBAL_STATE) {
     // wird power_fault gesetzt. Ein einziger transienter Einbruch am 12V-Netzteil
     // (z.B. Lastwechsel anderer Verbraucher) triggert keinen false-positive Fault.
     // 3 Zyklen × 1800ms Poll-Rate = ~5.4 Sekunden anhaltender Fault → echter Fehler.
-    static uint8_t fault_count = 0;
+    // [FIX-5] Kein local static mehr — tps546_fault_count ist file-scope
+    // damit TPS546_clear_faults() ihn bei Recovery zurücksetzen kann.
 
     ESP_RETURN_ON_ERROR(smb_read_word(PMBUS_STATUS_WORD, &status), TAG, "Failed to read STATUS_WORD");
 
@@ -763,24 +776,24 @@ esp_err_t TPS546_check_status(GlobalState * GLOBAL_STATE) {
                   TPS546_STATUS_IOUT_OC | TPS546_STATUS_VIN_UV |
                   TPS546_STATUS_TEMP)) {
 
-        fault_count++;
+        tps546_fault_count++;
 
-        if (fault_count >= 3) {
+        if (tps546_fault_count >= 3) {
             // Anhaltender Fault — jetzt wirklich reagieren
             if (SYSTEM_MODULE->power_fault == 0) {
-                ESP_LOGW(TAG, "Sustained power fault after %d checks, reporting", fault_count);
+                ESP_LOGW(TAG, "Sustained power fault after %d checks, reporting", tps546_fault_count);
                 ESP_RETURN_ON_ERROR(TPS546_parse_status(status), TAG, "Failed to parse STATUS_WORD");
                 SYSTEM_MODULE->power_fault = 1;
             }
         } else {
             // Transienter Fault — warten ob er bleibt
-            ESP_LOGD(TAG, "Transient fault (count=%d/3), waiting for confirmation", fault_count);
+            ESP_LOGD(TAG, "Transient fault (count=%d/3), waiting for confirmation", tps546_fault_count);
         }
 
     } else {
         // Kein Fault — Zähler zurücksetzen
         if (fault_count > 0) {
-            ESP_LOGD(TAG, "Fault cleared after %d count(s)", fault_count);
+            ESP_LOGD(TAG, "Fault cleared after %d count(s)", tps546_fault_count);
         }
         fault_count = 0;
 
