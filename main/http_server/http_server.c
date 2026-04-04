@@ -791,6 +791,15 @@ static esp_err_t GET_system_info(httpd_req_t * req)
     }
 
     cJSON_AddNumberToObject(root, "uptimeSeconds", (esp_timer_get_time() - GLOBAL_STATE->SYSTEM_MODULE.start_time) / 1000000);
+
+    double luck = 0.0;
+    uint64_t shares = GLOBAL_STATE->SYSTEM_MODULE.shares_accepted;
+    uint32_t pool_diff = GLOBAL_STATE->pool_difficulty;
+    uint64_t best_session = GLOBAL_STATE->SYSTEM_MODULE.best_session_nonce_diff;
+    if (shares > 0 && pool_diff > 0) {
+        luck = ((double)best_session / ((double)pool_diff * (double)shares)) * 100.0;
+    }
+    cJSON_AddNumberToObject(root, "luckPercent", luck);
     cJSON_AddNumberToObject(root, "smallCoreCount", GLOBAL_STATE->DEVICE_CONFIG.family.asic.small_core_count);
     cJSON_AddStringToObject(root, "ASICModel", GLOBAL_STATE->DEVICE_CONFIG.family.asic.name);
     cJSON_AddStringToObject(root, "stratumURL", stratumURL);

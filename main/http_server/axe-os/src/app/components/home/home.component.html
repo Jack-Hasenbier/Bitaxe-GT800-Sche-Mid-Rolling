@@ -77,6 +77,18 @@
                 <div class="text-500 text-xs" *ngIf="!info.power_fault && info.expectedHashrate">
                     Expected: {{getExpectedEfficiency(info) | number: '1.2-2'}} J/Th
                 </div>
+                <ng-container *ngIf="!info.power_fault">
+                    <div class="mt-2 pt-2" style="border-top: 0.5px solid var(--surface-border)">
+                        <div>
+                            <span class="text-green-400 font-medium">{{ (info.power / 1000) | number: '1.3-3' }}</span>
+                            <span class="text-500"> kWh/h</span>
+                        </div>
+                        <div class="mt-1">
+                            <span class="text-green-400 font-medium">{{ (info.power / 1000 * 24) | number: '1.3-3' }}</span>
+                            <span class="text-500"> kWh/24h</span>
+                        </div>
+                    </div>
+                </ng-container>
             </div>
         </div>
         <div class="col-12 md:col-6 xl:col-3">
@@ -88,6 +100,7 @@
                         </div>
                     </div>
                 </div>
+                <div style="min-height: 4rem;">
                 <div *ngIf="info.sharesRejected === 0">
                     <span class="text-red-500 font-medium">0 </span>
                     <span class="text-500">rejected</span>
@@ -106,13 +119,16 @@
                             [split]=false />
                     </div>
                 </ng-container>
-                <div class="mt-2">
-                    <span class="text-green-400 font-medium">{{ getSharesPerHour(info) | number: '1.0-0' }}</span>
-                    <span class="text-500"> shares/h</span>
                 </div>
-                <div class="mt-1">
-                    <span class="text-green-400 font-medium">{{ getSharesPerHour(info) * 24 | number: '1.0-0' }}</span>
-                    <span class="text-500"> shares/24h</span>
+                <div class="mt-2 pt-2" style="border-top: 0.5px solid var(--surface-border)">
+                    <div>
+                        <span class="text-green-400 font-medium">{{ getSharesPerHour(info) | number: '1.0-0' }}</span>
+                        <span class="text-500"> shares/h</span>
+                    </div>
+                    <div class="mt-1">
+                        <span class="text-green-400 font-medium">{{ getSharesPerHour(info) * 24 | number: '1.0-0' }}</span>
+                        <span class="text-500"> shares/24h</span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -129,6 +145,12 @@
                 </div>
                 <span class="text-900 font-medium">{{info.bestSessionDiff | diffSuffix}} </span>
                 <span class="text-500">since system boot</span>
+                <div class="mt-2 pt-2" style="border-top: 0.5px solid var(--surface-border)">
+                    <span class="font-medium" [ngClass]="info.luckPercent >= 100 ? 'text-green-400' : 'text-red-400'">
+                        {{ info.luckPercent | number: '1.1-1' }}%
+                    </span>
+                    <span class="text-500"> luck</span>
+                </div>
             </div>
         </div>
 

@@ -1,6 +1,7 @@
 #ifndef BM1370_H_
 #define BM1370_H_
 
+#include "global_state.h"
 #include "common.h"
 #include "mining.h"
 
