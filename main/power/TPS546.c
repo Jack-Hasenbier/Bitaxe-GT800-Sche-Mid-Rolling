@@ -792,10 +792,10 @@ esp_err_t TPS546_check_status(GlobalState * GLOBAL_STATE) {
 
     } else {
         // Kein Fault — Zähler zurücksetzen
-        if (fault_count > 0) {
+        if (tps546_fault_count > 0) {
             ESP_LOGD(TAG, "Fault cleared after %d count(s)", tps546_fault_count);
         }
-        fault_count = 0;
+        tps546_fault_count = 0;
 
         // [FIX-3] Latched Fault-Bits im TPS546 löschen sobald Status wieder sauber.
         // Verhindert dass der TPS546 dauerhaft im Fault-Zustand bleibt nach

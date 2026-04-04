@@ -67,6 +67,9 @@ int SERIAL_send(uint8_t *data, int len, bool debug)
         printf("\n");
     }
 
+    // Rückgabewert: Anzahl geschriebener Bytes, oder -1 bei Fehler.
+    // Aufrufer sollten auf (<= 0) prüfen, nicht nur (== 0),
+    // da uart_write_bytes bei UART-Fehler -1 zurückgibt.
     return uart_write_bytes(UART_NUM_1, (const char *)data, len);
 }
 

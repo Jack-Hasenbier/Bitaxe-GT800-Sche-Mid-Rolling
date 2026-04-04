@@ -58,8 +58,13 @@ esp_err_t EMC2103_set_beta_compensation(uint8_t beta){
  */
 esp_err_t EMC2103_set_fan_speed(float percent)
 {
-    uint8_t setting = (uint8_t) (255.0 * percent);
-    //ESP_LOGI(TAG, "Setting fan speed to %.2f%% (%d)", percent*100.0, setting);
+    // [FIX-A] Eingangsvalidierung: percent auf 0.0-1.0 begrenzen.
+    // Ohne Clamp: percent=1.5 → (uint8_t)(382.5) = 126 → stiller Überlauf,
+    // Lüfter läuft nur auf 50% statt 100%.
+    if (percent < 0.0f) percent = 0.0f;
+    if (percent > 1.0f) percent = 1.0f;
+
+    uint8_t setting = (uint8_t) (255.0f * percent);
     ESP_RETURN_ON_ERROR(i2c_bitaxe_register_write_byte(EMC2103_dev_handle, EMC2103_FAN_SETTING, setting), TAG, "Failed to set fan speed");
     return ESP_OK;
 }
@@ -93,11 +98,17 @@ uint16_t EMC2103_get_fan_speed(void)
     reading = tach_lsb | (tach_msb << 8);
     reading >>= 3;
 
+    // [FIX-B] Division-durch-Null-Schutz.
+    // reading=0 tritt auf wenn TACH-Sensor noch nicht bereit ist.
+    // 7864320 / 0 → undefined behavior auf ESP32 → Absturz/WDT.
+    if (reading == 0) {
+        return 0;
+    }
+
     //RPM = (3,932,160 * m)/reading
     //m is the multipler, which is default 2
     RPM = 7864320 / reading;
 
-    // ESP_LOGI(TAG, "Fan Speed = %d RPM", RPM);
     if (RPM == 82) {
         return 0;
     }
@@ -127,6 +138,11 @@ static float get_external_temp(int i, uint8_t msb_register, uint8_t lsb_register
 
     if (reading == EMC2103_TEMP_DIODE_FAULT) {
         ESP_LOGE(TAG, "EMC2103 TEMP_DIODE%d_FAULT: %04X", i, reading);
+        // [FIX-C] Bei Sensor-Fehler -1.0f zurückgeben statt falscher Temperatur.
+        // Ohne return: reading=0x8000 → nach >>5 = 0x0400 → sign-extend → -1024
+        // → result = -128.0°C → power_management hält das für gültig und handelt falsch.
+        // -1.0f wird von power_management als "ungültig" erkannt (>= 0 Check).
+        return -1.0f;
     }
 
     reading >>= 5;  // Now, `reading` contains an 11-bit signed value

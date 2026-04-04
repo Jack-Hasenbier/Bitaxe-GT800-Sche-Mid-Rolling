@@ -9,7 +9,7 @@
 //             aus der Queue geholt.
 //             → Latenz bei neuem Block: max ~5ms statt bis zu 250ms.
 //             → Neue Blöcke werden sofort an den ASIC weitergeleitet.
-//             abandon_work wird nach dem Prüfen auf 0 zurückgesetzt
+//             abandon_work wird von create_jobs_task auf 0 zurückgesetzt
 //             (nur im asic_task, andere Tasks lesen es noch).
 //
 //  Unverändert gegenüber Original:
@@ -63,23 +63,26 @@ void ASIC_task(void *pvParameters)
         ASIC_send_work(GLOBAL_STATE, next_bm_job);
 
         // [SCHED-4] abandon_work Fast-Path
-        // abandon_work wird von stratum_task gesetzt wenn der Pool
+        // abandon_work wird von stratum_task/cleanQueue() gesetzt wenn der Pool
         // einen neuen Block meldet (mining.notify mit clean_jobs=true).
-        // Normalfall: Semaphore abwarten (ASIC signalisiert Fertig)
-        // Mit abandon_work: NICHT warten → sofort nächsten Job senden
         //
-        // Warum hier und nicht in bm1370.c?
-        // asic_task.c kontrolliert den Job-Takt. Das ist der richtige
-        // Ort um zu entscheiden ob der nächste Job sofort kommt.
-        // bm1370.c ist zuständig für das eigentliche Senden + Empfangen.
+        // Original-Design (create_jobs_task.c):
+        //   cleanQueue()        → abandon_work=1, Queues geleert
+        //   create_jobs_task    → erkennt abandon_work=1, xSemaphoreGive(), abandon_work=0
+        //
+        // asic_task LIEST abandon_work NUR — setzt es NICHT zurück.
+        // Das Reset ist Aufgabe von create_jobs_task (Original-Design beibehalten).
+        // Würden wir abandon_work=0 hier setzen, sieht create_jobs_task nie den
+        // Wert 1 → kein xSemaphoreGive() → asic_task blockiert bis Timeout.
+        //
+        // Was wir tun: Semaphore-Warten überspringen für sofortige Job-Reaktion.
+        // bm1370_scheduler.c liest abandon_work in BM1370_send_work() → setzt
+        // last_abandon_time_us korrekt (passiert vor diesem Check).
         if (GLOBAL_STATE->abandon_work) {
             // Nicht warten — neuer Block hat Priorität
-            // abandon_work auf 0 setzen damit bm1370.c den Timestamp
-            // nur einmal setzt (beim ersten Job nach dem neuen Block)
-            GLOBAL_STATE->abandon_work = 0;
-            ESP_LOGD(TAG, "abandon_work: skipping semaphore wait, sending new job immediately");
-            // Semaphore leeren falls sie noch gesetzt ist
+            // Semaphore leeren falls sie noch signalisiert wurde
             xSemaphoreTake(GLOBAL_STATE->ASIC_TASK_MODULE.semaphore, 0);
+            ESP_LOGD(TAG, "abandon_work: skipping semaphore wait for new block");
         } else {
             // Normaler Betrieb: auf ASIC-Fertig-Signal oder Timeout warten
             xSemaphoreTake(

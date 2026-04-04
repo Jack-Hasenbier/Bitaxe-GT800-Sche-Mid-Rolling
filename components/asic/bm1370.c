@@ -162,7 +162,9 @@ static void _send_BM1370(uint8_t header, const uint8_t * data, uint8_t data_len,
         buf[4 + data_len] = crc5(buf + 2, data_len + 2);
     }
 
-    if (SERIAL_send(buf, total_length, debug) == 0) {
+    // [FIX-E] <= 0 statt == 0: uart_write_bytes gibt -1 bei Fehler zurück.
+    // Mit == 0 würde ein UART-Fehler (-1 != 0) still ignoriert.
+    if (SERIAL_send(buf, total_length, debug) <= 0) {
         ESP_LOGE(TAG, "Failed to send data to BM1370");
     }
 }
