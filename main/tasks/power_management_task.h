@@ -8,6 +8,8 @@ typedef struct
     uint16_t fan2_rpm;
     float chip_temp_avg;
     float chip_temp2_avg;
+    float last_valid_chip_temp;
+    float last_valid_chip_temp2;
     float vr_temp;
     float voltage;
     float frequency_value;

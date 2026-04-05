@@ -130,7 +130,7 @@ void check_hashrate_anomaly(void *pvParameters, float current_hashrate)
         return;
     }
 
-    if (lowHashrateCount >= 3) {
+    if (lowHashrateCount >= 10) {  // Increased threshold to prevent false triggers from temp sensor issues
         reinitiateCount++;
         ESP_LOGW(TAG, "Reinitiating ASICs due to sustained low hashrate. Reinitiate count: %d", reinitiateCount);
 
