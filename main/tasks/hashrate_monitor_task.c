@@ -4,28 +4,18 @@
 //  Fixes gegenüber Original:
 //
 //  [FIX-1] Zero-Hashrate-Guard in check_hashrate_anomaly()
-//          Bei Pool-Reconnect / Stratum-Pause fällt current_hashrate
-//          kurz auf 0. Der Original-Code zählte das als Anomalie
-//          (0 < highest && 0 < threshold) → nach 3x → Reinitiate.
-//          Das war die Hauptursache der "willkürlichen Neustarts".
-//          Fix: current_hashrate == 0 → sofort return, kein Zählen.
-//
 //  [FIX-2] NaN/Inf-Schutz für lowerThreshold
-//          Wenn expected_hashrate beim Task-Start noch 0.0 ist,
-//          ergibt die Laufzeit-Berechnung in C: 0.0/0.0 = NaN.
-//          NaN-Vergleiche sind immer FALSE → Monitor blind.
-//          Fix: isfinite()-Check, Fallback auf sicheren Wert 0.50f.
-//
 //  [FIX-3] Threshold-Logging beim Start
-//          Der tatsächlich aktive Threshold war bisher unsichtbar
-//          im Log. Jetzt wird er explizit geloggt.
+//  [FIX-6] highest_hashrate nach Recovery zurücksetzen
+//  [FIX-7] Messwert-Strukturen nach Recovery zurücksetzen
 //
-//  UNVERÄNDERT:
-//  - Alle Messwert-Funktionen (update_hashrate, update_hash_counter)
-//  - ASIC-Reinitiate-Logik (lowHashrateCount >= 3)
-//  - Poll-Rate (5000ms)
-//  - upperThresholdHashratePercent (2.00f)
-//  - hashrate_monitor_register_read()
+//  [FIX-8] Stale-Packet Guard & Hashrate Sanity Check
+//          Behebt den "2 EH/s Spike" nach der Recovery. Alte Pakete
+//          im UART-Queue überschrieben bisher nach clear_measurements 
+//          die Zähler, was beim ersten frischen Poll zu riesigen Deltas 
+//          (Unterläufen) führte. 
+//          - just_recovered Flag leert die Messungen direkt vor dem Poll.
+//          - MAX_VALID_HASHRATE_GHS ignoriert absurde Berechnungen.
 // ============================================================
 
 #include <string.h>
@@ -43,6 +33,7 @@
 #define EPSILON 0.0001f
 #define POLL_RATE 5000
 #define HASHRATE_UNIT 0x100000uLL
+#define MAX_VALID_HASHRATE_GHS 10000000.0f // [FIX-8] 10 PH/s Limit für Sanity Check
 
 static const char *TAG = "hashrate_monitor";
 static float highest_hashrate = 0.0f;
@@ -50,6 +41,7 @@ static uint8_t lowHashrateCount = 0;
 static int reinitiateCount = 0;
 static float lowerThresholdHashratePercent = 0.50f;
 static float upperThresholdHashratePercent = 2.00f;
+static bool just_recovered = false; // [FIX-8] Flag für Post-Delay Clear
 
 static float sum_hashrates(measurement_t * measurement, int asic_count)
 {
@@ -82,18 +74,30 @@ static void update_hashrate(uint32_t value, measurement_t * measurement, int asi
     uint32_t hashrate_value = value & 0x7FFFFFFF;
 
     if (hashrate_value != 0x007FFFFF && !flag_long) {
-        float hashrate = hashrate_value * (float)HASHRATE_UNIT;
-        measurement[asic_nr].hashrate = hashrate / 1e9f;
+        float hashrate = (hashrate_value * (float)HASHRATE_UNIT) / 1e9f;
+        // [FIX-8] Sanity Check: Ignoriere unmögliche Werte (Verhindert 2 EH/s Glitches)
+        if (hashrate < MAX_VALID_HASHRATE_GHS) {
+            measurement[asic_nr].hashrate = hashrate;
+        }
     }
 }
 
 static void update_hash_counter(uint32_t time_ms, uint32_t value, measurement_t * measurement)
 {
     uint32_t previous_time_ms = measurement->time_ms;
-    if (previous_time_ms != 0) {
+    
+    // [FIX-8] time_ms > previous_time_ms stellt sicher, dass duration_ms niemals negativ wird.
+    if (previous_time_ms != 0 && time_ms > previous_time_ms) {
         uint32_t duration_ms = time_ms - previous_time_ms;
         uint32_t counter = value - measurement->value;
-        measurement->hashrate = hashCounterToGhs(duration_ms, counter);
+        float new_hr = hashCounterToGhs(duration_ms, counter);
+        
+        // [FIX-8] Sanity Check: Schützt vor Stale-Packet Unterläufen
+        if (new_hr < MAX_VALID_HASHRATE_GHS) {
+            measurement->hashrate = new_hr;
+        } else {
+            ESP_LOGW(TAG, "Ignoring impossible hashrate spike: %.3f Gh/s", new_hr);
+        }
     }
 
     measurement->value = value;
@@ -108,14 +112,7 @@ void check_hashrate_anomaly(void *pvParameters, float current_hashrate)
     float expected_hashrate = GLOBAL_STATE->POWER_MANAGEMENT_MODULE.expected_hashrate;
 
     // [FIX-1] Zero-Hashrate-Guard
-    // current_hashrate = 0 tritt normal auf bei:
-    //   - Pool-Reconnect (Stratum sendet kurz keine Jobs)
-    //   - Netzwerkunterbrechung
-    //   - Messregister noch nicht bereit nach Boot
-    // Das ist KEIN ASIC-Fehler → nicht zählen, sofort zurück.
-    // Original-Code zählte das als Anomalie → 3x → Reinitiate.
     if (current_hashrate < EPSILON) {
-        // Zähler zurücksetzen damit kein teilweiser Zählstand bleibt
         lowHashrateCount = 0;
         return;
     }
@@ -153,15 +150,16 @@ void check_hashrate_anomaly(void *pvParameters, float current_hashrate)
         lowHashrateCount = 0;
 
         // [FIX-6] highest_hashrate nach Recovery zurücksetzen.
-        // highest_hashrate ist statisch und wird nie verringert.
-        // Nach Recovery baut der ASIC die Hashrate schrittweise auf
-        // (z.B. 0 → 200 → 800 → 2897 GH/s). Ohne Reset gilt sofort:
-        // current(200) < highest(2897) → Anomalie-Zähler läuft hoch
-        // → nach 3 Zyklen neues Reinitiate → Reinitiate-Schleife.
-        // Mit Reset: highest startet bei 0, kein false-positive während
-        // der Aufwärmphase nach Recovery.
         highest_hashrate = 0.0f;
         ESP_LOGI(TAG, "highest_hashrate reset after recovery");
+
+        // [FIX-7] Initiale Leerung
+        clear_measurements(GLOBAL_STATE);
+        ESP_LOGI(TAG, "measurements cleared after recovery");
+        
+        // [FIX-8] Flag setzen, um Pakete, die sich während der folgenden Pause 
+        // im UART-Buffer verfangen haben, vor dem nächsten Durchlauf endgültig zu löschen.
+        just_recovered = true;
     }
 }
 
@@ -177,19 +175,15 @@ void hashrate_monitor_task(void *pvParameters)
     float expected_hashrate = GLOBAL_STATE->POWER_MANAGEMENT_MODULE.expected_hashrate;
 
     // Laufzeit-Berechnung des unteren Schwellwerts
-    // GT800 (2 ASICs, 4 Domains): ergibt 0.75 → Trigger bei 600 GH/s
     lowerThresholdHashratePercent = 1.0f - ((expected_hashrate / asic_count / hash_domains * 2.0f) / expected_hashrate);
 
     // [FIX-2] NaN/Inf-Schutz
-    // Wenn expected_hashrate beim Task-Start noch 0.0 ist:
-    // C berechnet 0.0/0.0 = NaN → alle Anomalie-Checks schlagen still fehl.
-    // Fallback auf 0.50f als sicheren Minimalwert.
     if (!isfinite(lowerThresholdHashratePercent) || lowerThresholdHashratePercent <= 0.0f) {
         ESP_LOGW(TAG, "lowerThreshold calculation produced invalid value (expected_hashrate=%.1f), using fallback 0.50", expected_hashrate);
         lowerThresholdHashratePercent = 0.50f;
     }
 
-    // [FIX-3] Threshold explizit loggen — war bisher unsichtbar
+    // [FIX-3] Threshold explizit loggen
     ESP_LOGI(TAG, "Hashrate thresholds: lower=%.2f (%.0f GH/s), upper=%.2f (%.0f GH/s)",
              lowerThresholdHashratePercent,
              expected_hashrate * lowerThresholdHashratePercent,
@@ -212,6 +206,13 @@ void hashrate_monitor_task(void *pvParameters)
 
     TickType_t taskWakeTime = xTaskGetTickCount();
     while (1) {
+        // [FIX-8] Zweite Leerung: Entfernt Stale Packets, die während der letzten 
+        // Pause (nach einer Anomalie) vom UART-Task verarbeitet wurden.
+        if (just_recovered) {
+            clear_measurements(GLOBAL_STATE);
+            just_recovered = false;
+        }
+
         ASIC_read_registers(GLOBAL_STATE);
 
         vTaskDelay(100 / portTICK_PERIOD_MS);
