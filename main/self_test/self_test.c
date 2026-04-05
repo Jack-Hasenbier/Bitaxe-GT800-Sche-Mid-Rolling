@@ -21,6 +21,7 @@
 #include "utils.h"
 #include "TPS546.h"
 #include "esp_psram.h"
+#include "esp_heap_caps.h"
 #include "power.h"
 #include "thermal.h"
 #include "power_management_task.h"
@@ -344,8 +345,9 @@ bool self_test(void * pvParameters)
         tests_done(GLOBAL_STATE, false);
     }
 
-    GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs = malloc(sizeof(bm_job *) * 128);
-    GLOBAL_STATE->valid_jobs = malloc(sizeof(uint8_t) * 128);
+    // [FIX-3] heap_caps_malloc statt malloc — konsistent mit asic_task.c
+    GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs = heap_caps_malloc(sizeof(bm_job *) * 128, MALLOC_CAP_SPIRAM);
+    GLOBAL_STATE->valid_jobs = heap_caps_malloc(sizeof(uint8_t) * 128, MALLOC_CAP_SPIRAM);
 
     for (int i = 0; i < 128; i++) {
         GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[i] = NULL;
@@ -355,7 +357,7 @@ bool self_test(void * pvParameters)
     vTaskDelay(1000 / portTICK_PERIOD_MS);
 
     mining_notify notify_message;
-    notify_message.job_id = 0;
+    notify_message.job_id = "0";  // [FIX-2] job_id ist char* — Literal statt NULL-Pointer
     notify_message.prev_block_hash = "0c859545a3498373a57452fac22eb7113df2a465000543520000000000000000";
     notify_message.version = 0x20000004;
     notify_message.target = 0x1705ae3a;
@@ -406,11 +408,17 @@ bool self_test(void * pvParameters)
 
     while (duration_ms < hashtest_ms) {
         task_result * asic_result = ASIC_process_work(GLOBAL_STATE);
+
+        // [FIX-1] duration_ms IMMER aktualisieren, nicht nur bei Nonce-Fund.
+        // Original: duration_ms nur innerhalb if(asic_result != NULL) gesetzt.
+        // Bei defektem/nicht antwortenden ASIC: duration_ms bleibt 0 →
+        // while(0 < 5000) → Endlosschleife → Watchdog-Reset.
+        duration_ms = (esp_timer_get_time() / 1000) - start_ms;
+
         if (asic_result != NULL) {
             // check the nonce difficulty
             double nonce_diff = test_nonce_value(&job, asic_result->nonce, asic_result->rolled_version);
             counter += DIFFICULTY;
-            duration_ms = (esp_timer_get_time() / 1000) - start_ms;
             hashrate = hashCounterToGhs(duration_ms, counter);
 
             ESP_LOGI(TAG, "Nonce %lu Nonce difficulty %.32f.", asic_result->nonce, nonce_diff);
