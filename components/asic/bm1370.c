@@ -292,12 +292,12 @@ int BM1370_set_default_baud(void)
     return 115749;
 }
 
-int BM1370_set_max_baud(void)
-{
-    ESP_LOGI(TAG, "Setting max baud of 1000000");
-    unsigned char fast_uart[] = {0x00, FAST_UART_CONFIGURATION, 0x11, 0x30, 0x02, 0x00};
+// Angepasste Konfiguration für 500k Baud
+int BM1370_set_max_baud(void) {
+    ESP_LOGI(TAG, "Setting max baud of 500000 for improved stability");
+    unsigned char fast_uart[] = {0x00, FAST_UART_CONFIGURATION, 0x11, 0x30, 0x04, 0x00};
     _send_BM1370((TYPE_CMD | GROUP_ALL | CMD_WRITE), fast_uart, 6, BM1370_SERIALTX_DEBUG);
-    return 1000000;
+    return 500000;
 }
 
 static uint8_t id = 0;

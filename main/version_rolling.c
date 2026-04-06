@@ -5,8 +5,8 @@
 
 static const char *TAG = "version_rolling";
 
-#define ADJUST_INTERVAL_MS   (3 * 60 * 1000)   // 3 Minuten oder 50 Shares, je nachdem was zuerst eintritt
-#define MIN_SHARES_BEFORE_ADJUST 50              // 50 Shares
+#define ADJUST_INTERVAL_MS   (3 * 60 * 1000)   // 3 Minuten oder 250 Nonces, je nachdem was zuerst eintritt
+#define MIN_SHARES_BEFORE_ADJUST 250              // 250 Nonces, entspricht ca. 3 Minuten bei 3Th/s.,   
 
 static struct {
     uint32_t version_mask;
@@ -49,7 +49,7 @@ void version_rolling_adjust(void) {
 
     if (!time_elapsed && !enough_shares) return;  // Weder Zeit noch Shares → nichts tun
 
-    // Immer loggen, dass ein Adjust durchgeführt wird (auch wenn keine Änderung)
+    // Immer loggen, dass ein Adjust durchgeführt wird (auch wenn keine Änderung)  250 Nonces oder 3 Minuten, je nachdem was zuerst eintritt
     ESP_LOGI(TAG, "Version rolling adjust triggered (time_elapsed=%d, enough_shares=%d, total_shares=%lu)",
              time_elapsed, enough_shares, vr.total_shares);
 
@@ -66,7 +66,7 @@ void version_rolling_adjust(void) {
             }
         }
     }
-
+    // Log erscheint nur, wenn sich die Reihenfolge tatsächlich ändert, um unnötige Logs zu vermeiden !!
     if (memcmp(vr.order, new_order, 4) != 0) {
         ESP_LOGI(TAG, "Optimizing midstate order: %d%d%d%d -> %d%d%d%d (success: %lu/%lu/%lu/%lu)",
                  vr.order[0], vr.order[1], vr.order[2], vr.order[3],
