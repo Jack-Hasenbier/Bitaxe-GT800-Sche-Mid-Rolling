@@ -5,6 +5,7 @@
 
 typedef struct
 {
+    uint32_t version_mask;   // dynamische Version-Maske
     uint32_t version;
     uint32_t version_mask;
     uint8_t prev_block_hash[32];

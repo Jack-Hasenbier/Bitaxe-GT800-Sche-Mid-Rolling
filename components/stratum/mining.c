@@ -1,6 +1,5 @@
 // ============================================================
 //  mining.c  –  Bitaxe GT800 optimiert + dynamisches Version‑Rolling
-//  Zusätzlich: version_rolling_apply_to_job() sortiert Midstates
 // ============================================================
 
 #include <string.h>
@@ -11,7 +10,8 @@
 #include "utils.h"
 #include "mbedtls/sha256.h"
 #include "esp_log.h"
-#include "version_rolling.h"
+#include "../../main/version_rolling.h"
+
 static const char *TAG = "mining";
 
 void free_bm_job(bm_job *job)
@@ -58,7 +58,6 @@ void calculate_merkle_root_hash(const char *coinbase_tx, const uint8_t merkle_br
 // Hilfsfunktion: Wendet optimierte Reihenfolge auf einen bm_job an
 void version_rolling_apply_to_job(bm_job *job, uint32_t version_mask, const uint8_t order[4]) {
     // Die vier Midstates sind bereits in job->midstate, midstate1, midstate2, midstate3 vorhanden.
-    // Wir kopieren sie in ein temporäres Array und dann gemäss order zurück.
     uint8_t *midstate_ptrs[4] = {
         job->midstate,
         job->midstate1,
@@ -72,9 +71,6 @@ void version_rolling_apply_to_job(bm_job *job, uint32_t version_mask, const uint
     for (int i = 0; i < 4; i++) {
         memcpy(midstate_ptrs[i], temp[order[i]], 32);
     }
-    // Die Version-Maske wird später beim Senden des Jobs verwendet (in BM1370_send_work)
-    // Da die Maske bereits in version_rolling_get_mask() steckt, muss sie separat an den ASIC.
-    // Hier setzen wir ein Feld im job, das dann vom Treiber genutzt wird.
     job->version_mask = version_mask;
 }
 
@@ -127,7 +123,7 @@ bm_job construct_bm_job(mining_notify *params, const char *merkle_root,
         new_job.num_midstates = 1;
     }
 
-    // Dynamische Optimierung: Reihenfolge der Midstates anpassen
+    // Dynamische Optimierung der Midstate-Reihenfolge
     const uint8_t *order = version_rolling_get_order();
     version_rolling_apply_to_job(&new_job, version_rolling_get_mask(), order);
 

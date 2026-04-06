@@ -11,4 +11,4 @@ uint32_t version_rolling_get_mask(void);
 void version_rolling_adjust(void);
 void version_rolling_reset(void);
 
-#endif /* VERSION_ROLLING_H_ */
+#endif

@@ -21,7 +21,7 @@
 #include "connect.h"
 #include "asic_reset.h"
 #include "asic_init.h"
-#include "version_rolling.h"   // Dynamisches Version‑Rolling
+#include "../../main/version_rolling.h"   // Dynamisches Version‑Rolling
 
 static GlobalState GLOBAL_STATE;
 

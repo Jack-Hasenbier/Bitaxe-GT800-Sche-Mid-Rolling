@@ -62,7 +62,7 @@
 #include <assert.h>
 
 // [VR] Dynamisches Version‑Rolling
-#include "version_rolling.h"
+#include "../../main/version_rolling.h"
 
 #define BM1370_CHIP_ID 0x1370
 #define BM1370_CHIP_ID_RESPONSE_LENGTH 11
