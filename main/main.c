@@ -78,7 +78,7 @@ void app_main(void)
         return;
     }
 
-    if (xTaskCreate(POWER_MANAGEMENT_task, "power management", 8192, (void *) &GLOBAL_STATE, 10, NULL) != pdPASS) {
+    if (xTaskCreate(POWER_MANAGEMENT_task, "power management", 9216, (void *) &GLOBAL_STATE, 10, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Error creating power management task");
     }
 
@@ -103,16 +103,16 @@ void app_main(void)
         return;
     }
 
-    if (xTaskCreate(stratum_task, "stratum admin", 8192, (void *) &GLOBAL_STATE, 5, NULL) != pdPASS) {
+    if (xTaskCreate(stratum_task, "stratum admin", 10240, (void *) &GLOBAL_STATE, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Error creating stratum admin task");
     }
     if (xTaskCreate(create_jobs_task, "stratum miner", 8192, (void *) &GLOBAL_STATE, 10, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Error creating stratum miner task");
     }
-    if (xTaskCreate(ASIC_task, "asic", 8192, (void *) &GLOBAL_STATE, 10, NULL) != pdPASS) {
+    if (xTaskCreate(ASIC_task, "asic", 12288, (void *) &GLOBAL_STATE, 10, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Error creating asic task");
     }
-    if (xTaskCreate(ASIC_result_task, "asic result", 8192, (void *) &GLOBAL_STATE, 15, NULL) != pdPASS) {
+    if (xTaskCreate(ASIC_result_task, "asic result", 12288, (void *) &GLOBAL_STATE, 15, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Error creating asic result task");
     }
     if (xTaskCreateWithCaps(hashrate_monitor_task, "hashrate monitor", 8192, (void *) &GLOBAL_STATE, 5, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
