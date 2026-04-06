@@ -9,12 +9,12 @@
 #include "esp_log.h"
 #include "soc/uart_struct.h"
 
-#include "serial.h"
+#include "serial.h"  // for BUF_SIZE 6144
 #include "utils.h"
 
 #define ECHO_TEST_TXD (17)
 #define ECHO_TEST_RXD (18)
-#define BUF_SIZE (1024)
+
 
 static const char *TAG = "serial";
 

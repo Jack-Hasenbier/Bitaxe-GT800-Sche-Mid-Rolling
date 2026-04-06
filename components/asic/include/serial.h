@@ -1,6 +1,8 @@
 #ifndef SERIAL_H_
 #define SERIAL_H_
 
+#define BUF_SIZE (3072)   // Genug Platz für 3 Job-Pakete (3*1024) + etwas Puffer, um Überläufe zu vermeiden
+
 #include "esp_err.h"
 
 typedef enum
