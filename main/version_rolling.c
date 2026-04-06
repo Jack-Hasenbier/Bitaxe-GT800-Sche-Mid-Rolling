@@ -5,9 +5,9 @@
 
 static const char *TAG = "version_rolling";
 
-#define ADJUST_INTERVAL_MS   (3 * 60 * 1000)   // Alle 3 Minuten anpassen, abhängig von der Hashrate und der Anzahl der Shares
-#define MIN_SHARES_BEFORE_ADJUST 5              // Hashrate abhängig, aber mindestens 5 Shares, bevor Anpassung erfolgt
-                                                // in etwas 20 anpassungen in der Stunden, abhängig von shares/h
+#define ADJUST_INTERVAL_MS   (3 * 60 * 1000)   // 3 Minuten oder 50 Shares, je nachdem was zuerst eintritt
+#define MIN_SHARES_BEFORE_ADJUST 50              // 50 Shares
+
 static struct {
     uint32_t version_mask;
     uint32_t success_count[4];
@@ -44,10 +44,15 @@ uint32_t version_rolling_get_mask(void) {
 
 void version_rolling_adjust(void) {
     int64_t now = esp_timer_get_time();
-     if (now - vr.last_adjust_time_us < ADJUST_INTERVAL_MS * 1000LL) return;  // Zeit noch nicht erreicht
-     if (vr.total_shares < MIN_SHARES_BEFORE_ADJUST) return;                  // Zu wenige Shares
-    // Beide Bedingungen erfüllt → optimieren
+    bool time_elapsed = (now - vr.last_adjust_time_us >= ADJUST_INTERVAL_MS * 1000LL);
+    bool enough_shares = (vr.total_shares >= MIN_SHARES_BEFORE_ADJUST);
 
+    // Nur zurückkehren, wenn weder Zeit noch Shares erfüllt sind
+    if (!time_elapsed && !enough_shares) {
+        return;
+    }
+
+    // Optimierung durchführen
     uint32_t counts[4];
     memcpy(counts, vr.success_count, sizeof(counts));
     uint8_t new_order[4] = {0,1,2,3};
@@ -61,16 +66,17 @@ void version_rolling_adjust(void) {
         }
     }
 
-if (memcmp(vr.order, new_order, 4) != 0) {
-    // Magenta Farbe: \033[35m, Reset: \033[0m (Standardfarbe)
-    ESP_LOGI(TAG, "\033[33mOptimizing midstate order: %d%d%d%d -> %d%d%d%d (success: %lu/%lu/%lu/%lu)\033[0m",
-             vr.order[0], vr.order[1], vr.order[2], vr.order[3],
-             new_order[0], new_order[1], new_order[2], new_order[3],
-             vr.success_count[0], vr.success_count[1],
-             vr.success_count[2], vr.success_count[3]);
-    memcpy(vr.order, new_order, 4);
-}
+    if (memcmp(vr.order, new_order, 4) != 0) {
+        // Gelbe Farbe (kannst du auf Magenta ändern, wenn du magst)
+        ESP_LOGI(TAG, "\033[33mOptimizing midstate order: %d%d%d%d -> %d%d%d%d (success: %lu/%lu/%lu/%lu)\033[0m",
+                 vr.order[0], vr.order[1], vr.order[2], vr.order[3],
+                 new_order[0], new_order[1], new_order[2], new_order[3],
+                 vr.success_count[0], vr.success_count[1],
+                 vr.success_count[2], vr.success_count[3]);
+        memcpy(vr.order, new_order, 4);
+    }
 
+    // Zähler zurücksetzen und Zeitstempel aktualisieren
     memset(vr.success_count, 0, sizeof(vr.success_count));
     vr.total_shares = 0;
     vr.last_adjust_time_us = now;
