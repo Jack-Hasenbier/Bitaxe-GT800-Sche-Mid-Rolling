@@ -18,6 +18,19 @@
 #include <pthread.h>
 #include <fcntl.h>
 
+// ---------- Ergänzung: Definition des fehlenden Typs ----------
+typedef struct {
+    struct sockaddr_storage dest_addr;
+    socklen_t addrlen;
+    int addr_family;
+    int ip_protocol;
+    char host_ip[INET6_ADDRSTRLEN + 16];
+} stratum_connection_info_t;
+
+// ---------- Ergänzung: fehlende globale Variablen ----------
+static const char *primary_stratum_url = NULL;
+static uint16_t primary_stratum_port = 0;
+
 // ---------- Konstanten ----------
 #define MAX_RETRY_ATTEMPTS              3
 #define MAX_CRITICAL_RETRY_ATTEMPTS     5
@@ -60,11 +73,9 @@ static pthread_mutex_t s_stratum_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // ---------- Lokale Hilfsfunktionen ----------
 static bool is_wifi_connected_fast(void) {
-    // Schnelle Abfrage über globales Flag (vom WiFi-Event-Handler zu setzen)
     return s_wifi_connected;
 }
 
-// Diese Funktion sollte im WiFi-Event-Handler aufgerufen werden
 void stratum_set_wifi_connected(bool connected) {
     s_wifi_connected = connected;
 }
@@ -73,7 +84,6 @@ void stratum_set_wifi_connected(bool connected) {
 static esp_err_t resolve_stratum_address_cached(const char *hostname, uint16_t port,
                                                 stratum_connection_info_t *conn_info) {
     time_t now = time(NULL);
-    // Prüfen, ob Cache gültig ist
     if (s_dns_cache.expires > now && strcmp(s_dns_cache.hostname, hostname) == 0 && s_dns_cache.port == port) {
         memcpy(&conn_info->dest_addr, &s_dns_cache.addr, s_dns_cache.addrlen);
         conn_info->addrlen = s_dns_cache.addrlen;
@@ -103,7 +113,6 @@ static esp_err_t resolve_stratum_address_cached(const char *hostname, uint16_t p
     memset(conn_info, 0, sizeof(stratum_connection_info_t));
     conn_info->addr_family = AF_UNSPEC;
 
-    // IPv6 bevorzugen
     struct addrinfo *p;
     for (p = res; p != NULL; p = p->ai_next) {
         if (p->ai_family == AF_INET6) {
@@ -132,7 +141,6 @@ static esp_err_t resolve_stratum_address_cached(const char *hostname, uint16_t p
         return ESP_FAIL;
     }
 
-    // Adresse in String umwandeln
     if (conn_info->addr_family == AF_INET6) {
         struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)&conn_info->dest_addr;
         inet_ntop(AF_INET6, &addr6->sin6_addr, conn_info->host_ip, sizeof(conn_info->host_ip));
@@ -146,7 +154,6 @@ static esp_err_t resolve_stratum_address_cached(const char *hostname, uint16_t p
                   conn_info->host_ip, sizeof(conn_info->host_ip));
     }
 
-    // Cache aktualisieren
     strncpy(s_dns_cache.hostname, hostname, sizeof(s_dns_cache.hostname) - 1);
     s_dns_cache.port = port;
     memcpy(&s_dns_cache.addr, &conn_info->dest_addr, conn_info->addrlen);
@@ -160,16 +167,13 @@ static esp_err_t resolve_stratum_address_cached(const char *hostname, uint16_t p
     return ESP_OK;
 }
 
-// Verbindung mit Timeout (nicht-blockierender Connect)
 static int tcp_connect_timeout(int sock, const struct sockaddr *addr, socklen_t addrlen, int timeout_sec) {
-    // Socket auf nicht-blockierend setzen
     int flags = fcntl(sock, F_GETFL, 0);
     if (flags == -1) return -1;
     if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) return -1;
 
     int ret = connect(sock, addr, addrlen);
     if (ret == 0) {
-        // Sofort verbunden
         fcntl(sock, F_SETFL, flags);
         return 0;
     }
@@ -184,7 +188,6 @@ static int tcp_connect_timeout(int sock, const struct sockaddr *addr, socklen_t 
     struct timeval tv = { .tv_sec = timeout_sec, .tv_usec = 0 };
     ret = select(sock + 1, NULL, &fdset, NULL, &tv);
     if (ret <= 0) {
-        // Timeout oder Fehler
         fcntl(sock, F_SETFL, flags);
         return -1;
     }
@@ -200,7 +203,6 @@ static int tcp_connect_timeout(int sock, const struct sockaddr *addr, socklen_t 
     return 0;
 }
 
-// Thread-sicheres Setzen von Strings (z. B. extranonce_str, scriptsig)
 static void set_string_mutex(char **target, char *new_value) {
     pthread_mutex_lock(&s_stratum_mutex);
     char *old = *target;
@@ -209,7 +211,6 @@ static void set_string_mutex(char **target, char *new_value) {
     free(old);
 }
 
-// Thread-sicheres Lesen eines Strings (ruft strdup auf – caller muss free)
 static char* get_string_mutex(char **source) {
     pthread_mutex_lock(&s_stratum_mutex);
     char *copy = (*source) ? strdup(*source) : NULL;
@@ -217,14 +218,12 @@ static char* get_string_mutex(char **source) {
     return copy;
 }
 
-// Bereinigt die Job-Warteschlangen und gibt allozierte mining_notify-Strukturen frei
 void cleanQueue(GlobalState * GLOBAL_STATE) {
     ESP_LOGI(TAG, "Clean Jobs: clearing queue");
     pthread_mutex_lock(&s_stratum_mutex);
     GLOBAL_STATE->abandon_work = 1;
     pthread_mutex_unlock(&s_stratum_mutex);
 
-    // Alle Elemente aus stratum_queue holen und freigeben
     while (GLOBAL_STATE->stratum_queue.count > 0) {
         mining_notify *notify = (mining_notify*) queue_dequeue(&GLOBAL_STATE->stratum_queue);
         if (notify) {
@@ -264,7 +263,6 @@ void stratum_close_connection(GlobalState * GLOBAL_STATE) {
     vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
-// Heartbeat-Task – optimiert: nur TCP-Verbindungstest, vollständiger Handshake nur bei Erfolg
 void stratum_primary_heartbeat(void * pvParameters) {
     GlobalState * GLOBAL_STATE = (GlobalState *) pvParameters;
 
@@ -295,7 +293,6 @@ void stratum_primary_heartbeat(void * pvParameters) {
             continue;
         }
 
-        // Nur Verbindungstest mit kurzem Timeout
         int err = tcp_connect_timeout(sock, (struct sockaddr *)&conn_info.dest_addr,
                                       conn_info.addrlen, CONNECT_TIMEOUT_SEC);
         close(sock);
@@ -318,7 +315,6 @@ static void decode_mining_notification(GlobalState * GLOBAL_STATE, const mining_
     int coinbase_1_len = strlen(mining_notification->coinbase_1) / 2;
     int coinbase_2_len = strlen(mining_notification->coinbase_2) / 2;
 
-    // Offsets als Konstanten
     const int coinbase_scriptsig_offset = COINBASE_SCRIPTSIG_LEN_OFFSET;
     if (coinbase_1_len < coinbase_scriptsig_offset) return;
 
@@ -390,6 +386,7 @@ void stratum_task(void * pvParameters) {
 
     primary_stratum_url = GLOBAL_STATE->SYSTEM_MODULE.pool_url;
     primary_stratum_port = GLOBAL_STATE->SYSTEM_MODULE.pool_port;
+
     char * stratum_url = GLOBAL_STATE->SYSTEM_MODULE.pool_url;
     uint16_t port = GLOBAL_STATE->SYSTEM_MODULE.pool_port;
     bool extranonce_subscribe = GLOBAL_STATE->SYSTEM_MODULE.pool_extranonce_subscribe;
@@ -422,7 +419,6 @@ void stratum_task(void * pvParameters) {
 
             GLOBAL_STATE->SYSTEM_MODULE.is_using_fallback = !GLOBAL_STATE->SYSTEM_MODULE.is_using_fallback;
 
-            // Reset share stats
             for (int i = 0; i < GLOBAL_STATE->SYSTEM_MODULE.rejected_reason_stats_count; i++) {
                 GLOBAL_STATE->SYSTEM_MODULE.rejected_reason_stats[i].count = 0;
                 GLOBAL_STATE->SYSTEM_MODULE.rejected_reason_stats[i].message[0] = '\0';
@@ -471,7 +467,6 @@ void stratum_task(void * pvParameters) {
         }
         retry_critical_attempts = 0;
 
-        // Verbindung mit Timeout
         if (tcp_connect_timeout(sock, (struct sockaddr *)&conn_info.dest_addr,
                                 conn_info.addrlen, CONNECT_TIMEOUT_SEC) != 0) {
             retry_attempts++;
@@ -482,7 +477,6 @@ void stratum_task(void * pvParameters) {
             continue;
         }
 
-        // Socket Timeouts setzen
         struct timeval tcp_snd_timeout = { .tv_sec = 5, .tv_usec = 0 };
         struct timeval tcp_rcv_timeout = { .tv_sec = 180, .tv_usec = 0 };
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tcp_snd_timeout, sizeof(tcp_snd_timeout));
@@ -496,9 +490,8 @@ void stratum_task(void * pvParameters) {
 
         stratum_reset_uid(GLOBAL_STATE);
         cleanQueue(GLOBAL_STATE);
-        GLOBAL_STATE->abandon_work = 0;   // nach cleanQueue wieder erlauben
+        GLOBAL_STATE->abandon_work = 0;
 
-        // Stratum Handshake
         STRATUM_V1_configure_version_rolling(sock, GLOBAL_STATE->send_uid++, &GLOBAL_STATE->version_mask);
         STRATUM_V1_subscribe(sock, GLOBAL_STATE->send_uid++, GLOBAL_STATE->DEVICE_CONFIG.family.asic.name);
 
@@ -513,7 +506,6 @@ void stratum_task(void * pvParameters) {
         STRATUM_V1_authorize(sock, authorize_message_id, username, password);
         STRATUM_V1_stamp_tx(authorize_message_id);
 
-        // Hauptschleife für Nachrichtenempfang
         while (1) {
             char *line = STRATUM_V1_receive_jsonrpc_line(sock);
             if (!line) {
@@ -523,20 +515,20 @@ void stratum_task(void * pvParameters) {
                 break;
             }
 
-            double response_time_ms = STRATUM_V1_get_response_time_ms(stratum_api_v1_message.message_id);
+            double response_time_ms = STRATUM_V1_get_response_time_ms(StratumApiV1Message.message_id);
             if (response_time_ms >= 0) {
                 ESP_LOGI(TAG, "Stratum response time: %.2f ms", response_time_ms);
                 GLOBAL_STATE->SYSTEM_MODULE.response_time = response_time_ms;
             }
 
-            STRATUM_V1_parse(&stratum_api_v1_message, line);
+            STRATUM_V1_parse(&StratumApiV1Message, line);
             free(line);
 
-            if (stratum_api_v1_message.method == MINING_NOTIFY) {
+            if (StratumApiV1Message.method == MINING_NOTIFY) {
                 GLOBAL_STATE->SYSTEM_MODULE.work_received++;
-                SYSTEM_notify_new_ntime(GLOBAL_STATE, stratum_api_v1_message.mining_notification->ntime);
+                SYSTEM_notify_new_ntime(GLOBAL_STATE, StratumApiV1Message.mining_notification->ntime);
 
-                if (stratum_api_v1_message.should_abandon_work) {
+                if (StratumApiV1Message.should_abandon_work) {
                     pthread_mutex_lock(&s_stratum_mutex);
                     bool abandon = (GLOBAL_STATE->stratum_queue.count > 0 || GLOBAL_STATE->ASIC_jobs_queue.count > 0);
                     pthread_mutex_unlock(&s_stratum_mutex);
@@ -545,68 +537,65 @@ void stratum_task(void * pvParameters) {
                     }
                 }
 
-                // Queue-Überlauf vermeiden
                 if (GLOBAL_STATE->stratum_queue.count == QUEUE_SIZE) {
                     mining_notify *old = (mining_notify*) queue_dequeue(&GLOBAL_STATE->stratum_queue);
                     STRATUM_V1_free_mining_notify(old);
                 }
-                queue_enqueue(&GLOBAL_STATE->stratum_queue, stratum_api_v1_message.mining_notification);
-                decode_mining_notification(GLOBAL_STATE, stratum_api_v1_message.mining_notification);
+                queue_enqueue(&GLOBAL_STATE->stratum_queue, StratumApiV1Message.mining_notification);
+                decode_mining_notification(GLOBAL_STATE, StratumApiV1Message.mining_notification);
             }
-            else if (stratum_api_v1_message.method == MINING_SET_DIFFICULTY) {
-                ESP_LOGI(TAG, "Set pool difficulty: %ld", stratum_api_v1_message.new_difficulty);
-                GLOBAL_STATE->pool_difficulty = stratum_api_v1_message.new_difficulty;
+            else if (StratumApiV1Message.method == MINING_SET_DIFFICULTY) {
+                ESP_LOGI(TAG, "Set pool difficulty: %ld", StratumApiV1Message.new_difficulty);
+                GLOBAL_STATE->pool_difficulty = StratumApiV1Message.new_difficulty;
                 GLOBAL_STATE->new_set_mining_difficulty_msg = true;
             }
-            else if (stratum_api_v1_message.method == MINING_SET_VERSION_MASK ||
-                     stratum_api_v1_message.method == STRATUM_RESULT_VERSION_MASK) {
-                ESP_LOGI(TAG, "Set version mask: %08lx", stratum_api_v1_message.version_mask);
-                GLOBAL_STATE->version_mask = stratum_api_v1_message.version_mask;
+            else if (StratumApiV1Message.method == MINING_SET_VERSION_MASK ||
+                     StratumApiV1Message.method == STRATUM_RESULT_VERSION_MASK) {
+                ESP_LOGI(TAG, "Set version mask: %08lx", StratumApiV1Message.version_mask);
+                GLOBAL_STATE->version_mask = StratumApiV1Message.version_mask;
                 GLOBAL_STATE->new_stratum_version_rolling_msg = true;
             }
-            else if (stratum_api_v1_message.method == MINING_SET_EXTRANONCE ||
-                     stratum_api_v1_message.method == STRATUM_RESULT_SUBSCRIBE) {
-                // Sicherheitsbegrenzung
-                if (stratum_api_v1_message.extranonce_2_len > MAX_EXTRANONCE_2_LEN) {
+            else if (StratumApiV1Message.method == MINING_SET_EXTRANONCE ||
+                     StratumApiV1Message.method == STRATUM_RESULT_SUBSCRIBE) {
+                if (StratumApiV1Message.extranonce_2_len > MAX_EXTRANONCE_2_LEN) {
                     ESP_LOGW(TAG, "Extranonce_2_len %d exceeds maximum %d, clamping",
-                             stratum_api_v1_message.extranonce_2_len, MAX_EXTRANONCE_2_LEN);
-                    stratum_api_v1_message.extranonce_2_len = MAX_EXTRANONCE_2_LEN;
+                             StratumApiV1Message.extranonce_2_len, MAX_EXTRANONCE_2_LEN);
+                    StratumApiV1Message.extranonce_2_len = MAX_EXTRANONCE_2_LEN;
                 }
                 ESP_LOGI(TAG, "Set extranonce: %s, extranonce_2_len: %d",
-                         stratum_api_v1_message.extranonce_str, stratum_api_v1_message.extranonce_2_len);
-                set_string_mutex(&GLOBAL_STATE->extranonce_str, stratum_api_v1_message.extranonce_str);
-                GLOBAL_STATE->extranonce_2_len = stratum_api_v1_message.extranonce_2_len;
-                // Der alte Wert wird von set_string_mutex freigegeben
+                         StratumApiV1Message.extranonce_str, StratumApiV1Message.extranonce_2_len);
+                set_string_mutex(&GLOBAL_STATE->extranonce_str, StratumApiV1Message.extranonce_str);
+                GLOBAL_STATE->extranonce_2_len = StratumApiV1Message.extranonce_2_len;
             }
-            else if (stratum_api_v1_message.method == CLIENT_RECONNECT) {
+            else if (StratumApiV1Message.method == CLIENT_RECONNECT) {
                 ESP_LOGE(TAG, "Pool requested client reconnect...");
                 stratum_close_connection(GLOBAL_STATE);
                 break;
             }
-            else if (stratum_api_v1_message.method == STRATUM_RESULT) {
-                if (stratum_api_v1_message.response_success) {
+            else if (StratumApiV1Message.method == STRATUM_RESULT) {
+                if (StratumApiV1Message.response_success) {
                     ESP_LOGI(TAG, "message result accepted");
                     SYSTEM_notify_accepted_share(GLOBAL_STATE);
                 } else {
-                    ESP_LOGW(TAG, "message result rejected: %s", stratum_api_v1_message.error_str);
-                    SYSTEM_notify_rejected_share(GLOBAL_STATE, stratum_api_v1_message.error_str);
+                    ESP_LOGW(TAG, "message result rejected: %s", StratumApiV1Message.error_str);
+                    SYSTEM_notify_rejected_share(GLOBAL_STATE, StratumApiV1Message.error_str);
                 }
             }
-            else if (stratum_api_v1_message.method == STRATUM_RESULT_SETUP) {
-                retry_attempts = 0;   // erfolgreich empfangen
-                if (stratum_api_v1_message.response_success) {
+            else if (StratumApiV1Message.method == STRATUM_RESULT_SETUP) {
+                retry_attempts = 0;
+                if (StratumApiV1Message.response_success) {
                     ESP_LOGI(TAG, "setup message accepted");
-                    if (stratum_api_v1_message.message_id == authorize_message_id && difficulty > 0) {
+                    if (StratumApiV1Message.message_id == authorize_message_id && difficulty > 0) {
                         STRATUM_V1_suggest_difficulty(sock, GLOBAL_STATE->send_uid++, difficulty);
                     }
                     if (extranonce_subscribe) {
                         STRATUM_V1_extranonce_subscribe(sock, GLOBAL_STATE->send_uid++);
                     }
                 } else {
-                    ESP_LOGE(TAG, "setup message rejected: %s", stratum_api_v1_message.error_str);
+                    ESP_LOGE(TAG, "setup message rejected: %s", StratumApiV1Message.error_str);
                 }
             }
-        } // Ende while(1) innere Schleife
-    } // Ende while(1) äußere Schleife
+        }
+    }
     vTaskDelete(NULL);
 }
