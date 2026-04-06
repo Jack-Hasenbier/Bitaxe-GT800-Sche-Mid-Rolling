@@ -40,4 +40,7 @@ void extranonce_2_generate(uint64_t extranonce_2, uint32_t length, char dest[sta
 
 uint32_t increment_bitmask(const uint32_t value, const uint32_t mask);
 
+// Dynamisches Version‑Rolling (wird von construct_bm_job genutzt)
+void version_rolling_apply_to_job(bm_job *job, uint32_t version_mask, const uint8_t order[4]);
+
 #endif /* MINING_H_ */

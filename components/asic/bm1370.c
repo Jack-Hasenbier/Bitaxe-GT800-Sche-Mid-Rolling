@@ -61,6 +61,9 @@
 #include <arpa/inet.h>
 #include <assert.h>
 
+// [VR] Dynamisches Version‑Rolling
+#include "version_rolling.h"
+
 #define BM1370_CHIP_ID 0x1370
 #define BM1370_CHIP_ID_RESPONSE_LENGTH 11
 
@@ -415,6 +418,11 @@ task_result * BM1370_process_work(void * pvParameters)
     }
 
     uint32_t rolled_version = GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job_id]->version | version_bits;
+
+    // ============================================================
+    // [VR] Dynamisches Version‑Rolling: Erfolg dieser Midstate registrieren
+    // ============================================================
+    version_rolling_record_success(asic_result.job.midstate_num);
 
     result.job_id = job_id;
     result.nonce = asic_result.job.nonce;

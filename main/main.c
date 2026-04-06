@@ -21,6 +21,7 @@
 #include "connect.h"
 #include "asic_reset.h"
 #include "asic_init.h"
+#include "version_rolling.h"   // Dynamisches Version‑Rolling
 
 static GlobalState GLOBAL_STATE;
 
@@ -61,6 +62,9 @@ void app_main(void)
         ESP_LOGE(TAG, "Failed to init device config");
         return;
     }
+
+    // [VR] Dynamisches Version‑Rolling initialisieren
+    version_rolling_init();
 
     if (self_test(&GLOBAL_STATE)) return;
 

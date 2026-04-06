@@ -12,6 +12,9 @@
 //             abandon_work wird von create_jobs_task auf 0 zurückgesetzt
 //             (nur im asic_task, andere Tasks lesen es noch).
 //
+//   [VR]      Nach jedem Job wird version_rolling_adjust() aufgerufen,
+//             um die Reihenfolge der Midstates periodisch zu optimieren.
+//
 //  Unverändert gegenüber Original:
 //   - ASIC_initalized-Check
 //   - queue_dequeue() (blockierend, kein Timeout)
@@ -30,6 +33,7 @@
 #include "freertos/task.h"
 
 #include "asic.h"
+#include "version_rolling.h"   // [VR] Dynamisches Version‑Rolling
 
 static const char *TAG = "asic_task";
 
@@ -61,6 +65,9 @@ void ASIC_task(void *pvParameters)
         bm_job *next_bm_job = (bm_job *)queue_dequeue(&GLOBAL_STATE->ASIC_jobs_queue);
 
         ASIC_send_work(GLOBAL_STATE, next_bm_job);
+
+        // [VR] Dynamisches Version‑Rolling: Periodische Anpassung der Midstate‑Reihenfolge
+        version_rolling_adjust();
 
         // [SCHED-4] abandon_work Fast-Path
         // abandon_work wird von stratum_task/cleanQueue() gesetzt wenn der Pool

@@ -1,23 +1,6 @@
 // ============================================================
-//  mining.c  –  Bitaxe GT800 optimiert
-//  Änderungen gegenüber Original:
-//   1. construct_coinbase_tx: snprintf statt strcpy/strcat-Kette.
-//      Sicherer gegen Buffer-Overflow, kein UB bei Längenfehlern.
-//   2. calculate_merkle_root_hash: VLA (Variable Length Array) auf
-//      dem Stack durch heap_alloc ersetzt. VLAs mit unbekannter
-//      Größe (coinbase_tx_bin_len kann groß werden) können den
-//      ESP32-Stack überlaufen → Stack Overflow → Absturz.
-//      heap_alloc + free ist sicher.
-//   3. construct_bm_job: keine funktionalen Änderungen, aber
-//      explizites Null-Init der neuen job-Struktur via memset
-//      verhindert undefinierte Werte in Padding-Bytes, die als
-//      Job-Daten an den ASIC gesendet werden.
-//   4. test_nonce_value: mbedtls_sha256_context-basierte API
-//      (init/starts/update/finish/free) statt direktem Einzel-
-//      Aufruf – sauberer, zukunftssicher gegenüber mbedtls-Updates.
-//      Gleiches Ergebnis, aber kein deprecated-API-Aufruf.
-//   5. extranonce_2_generate: copy_len-Berechnung mit explizitem
-//      Cast, kein implizites Vorzeichen-Mismatch.
+//  mining.c  –  Bitaxe GT800 optimiert + dynamisches Version‑Rolling
+//  Zusätzlich: version_rolling_apply_to_job() sortiert Midstates
 // ============================================================
 
 #include <string.h>
@@ -28,6 +11,7 @@
 #include "utils.h"
 #include "mbedtls/sha256.h"
 #include "esp_log.h"
+#include "version_rolling.h"
 
 static const char *TAG = "mining";
 
@@ -41,19 +25,14 @@ void free_bm_job(bm_job *job)
 char *construct_coinbase_tx(const char *coinbase_1, const char *coinbase_2,
                             const char *extranonce, const char *extranonce_2)
 {
-    // [OPT-1] Länge exakt berechnen, snprintf für sichere Konstruktion
     size_t len = strlen(coinbase_1) + strlen(extranonce) +
                  strlen(extranonce_2) + strlen(coinbase_2) + 1;
-
     char *coinbase_tx = malloc(len);
     if (!coinbase_tx) {
         ESP_LOGE(TAG, "construct_coinbase_tx: malloc failed");
         return NULL;
     }
-
-    // Reihenfolge: coinbase_1 + extranonce + extranonce_2 + coinbase_2
     snprintf(coinbase_tx, len, "%s%s%s%s", coinbase_1, extranonce, extranonce_2, coinbase_2);
-
     return coinbase_tx;
 }
 
@@ -61,34 +40,49 @@ void calculate_merkle_root_hash(const char *coinbase_tx, const uint8_t merkle_br
                                 const int num_merkle_branches, char dest[65])
 {
     size_t coinbase_tx_bin_len = strlen(coinbase_tx) / 2;
-
-    // [OPT-2] Heap statt VLA – verhindert Stack-Overflow bei langen
-    // Coinbase-Transaktionen (kann 200-400 Bytes sein)
     uint8_t *coinbase_tx_bin = malloc(coinbase_tx_bin_len);
     if (!coinbase_tx_bin) {
         ESP_LOGE(TAG, "calculate_merkle_root_hash: malloc failed");
         return;
     }
-
     hex2bin(coinbase_tx, coinbase_tx_bin, coinbase_tx_bin_len);
-
     uint8_t both_merkles[64];
     double_sha256_bin(coinbase_tx_bin, coinbase_tx_bin_len, both_merkles);
-    free(coinbase_tx_bin); // sofort freigeben, nicht mehr benötigt
-
+    free(coinbase_tx_bin);
     for (int i = 0; i < num_merkle_branches; i++) {
         memcpy(both_merkles + 32, merkle_branches[i], 32);
         double_sha256_bin(both_merkles, 64, both_merkles);
     }
-
     bin2hex(both_merkles, 32, dest, 65);
+}
+
+// Hilfsfunktion: Wendet optimierte Reihenfolge auf einen bm_job an
+void version_rolling_apply_to_job(bm_job *job, uint32_t version_mask, const uint8_t order[4]) {
+    // Die vier Midstates sind bereits in job->midstate, midstate1, midstate2, midstate3 vorhanden.
+    // Wir kopieren sie in ein temporäres Array und dann gemäss order zurück.
+    uint8_t *midstate_ptrs[4] = {
+        job->midstate,
+        job->midstate1,
+        job->midstate2,
+        job->midstate3
+    };
+    uint8_t temp[4][32];
+    for (int i = 0; i < 4; i++) {
+        memcpy(temp[i], midstate_ptrs[i], 32);
+    }
+    for (int i = 0; i < 4; i++) {
+        memcpy(midstate_ptrs[i], temp[order[i]], 32);
+    }
+    // Die Version-Maske wird später beim Senden des Jobs verwendet (in BM1370_send_work)
+    // Da die Maske bereits in version_rolling_get_mask() steckt, muss sie separat an den ASIC.
+    // Hier setzen wir ein Feld im job, das dann vom Treiber genutzt wird.
+    job->version_mask = version_mask;
 }
 
 bm_job construct_bm_job(mining_notify *params, const char *merkle_root,
                         const uint32_t version_mask, const uint32_t difficulty)
 {
     bm_job new_job;
-    // [OPT-3] Null-Initialisierung – verhindert Garbage in Padding-Bytes
     memset(&new_job, 0, sizeof(bm_job));
 
     new_job.version = params->version;
@@ -134,6 +128,10 @@ bm_job construct_bm_job(mining_notify *params, const char *merkle_root,
         new_job.num_midstates = 1;
     }
 
+    // Dynamische Optimierung: Reihenfolge der Midstates anpassen
+    const uint8_t *order = version_rolling_get_order();
+    version_rolling_apply_to_job(&new_job, version_rolling_get_mask(), order);
+
     return new_job;
 }
 
@@ -142,22 +140,17 @@ void extranonce_2_generate(uint64_t extranonce_2, uint32_t length,
 {
     uint8_t extranonce_2_bytes[length];
     memset(extranonce_2_bytes, 0, length);
-
-    // [OPT-5] Expliziter Cast, kein implizites Vorzeichen-Mismatch
     size_t copy_len = (length < (uint32_t)sizeof(uint64_t)) ? (size_t)length : sizeof(uint64_t);
     memcpy(extranonce_2_bytes, &extranonce_2, copy_len);
-
     bin2hex(extranonce_2_bytes, length, dest, length * 2 + 1);
 }
 
-// truediffone für Nonce-Difficulty-Berechnung
 static const double truediffone = 26959535291011309493156476344723991336010898738574164086137773096960.0;
 
 double test_nonce_value(const bm_job *job, const uint32_t nonce, const uint32_t rolled_version)
 {
     double d64, s64, ds;
     unsigned char header[80];
-
     memcpy(header,      &rolled_version,     4);
     memcpy(header + 4,  job->prev_block_hash, 32);
     memcpy(header + 36, job->merkle_root,     32);
@@ -168,9 +161,7 @@ double test_nonce_value(const bm_job *job, const uint32_t nonce, const uint32_t 
     unsigned char hash_buffer[32];
     unsigned char hash_result[32];
 
-    // [OPT-4] mbedtls context-basierte API (nicht deprecated)
     mbedtls_sha256_context ctx;
-
     mbedtls_sha256_init(&ctx);
     mbedtls_sha256_starts(&ctx, 0);
     mbedtls_sha256_update(&ctx, header, 80);
@@ -186,23 +177,18 @@ double test_nonce_value(const bm_job *job, const uint32_t nonce, const uint32_t 
     d64 = truediffone;
     s64 = le256todouble(hash_result);
     ds  = d64 / s64;
-
     return ds;
 }
 
 uint32_t increment_bitmask(const uint32_t value, const uint32_t mask)
 {
-    if (mask == 0)
-        return value;
-
-    uint32_t carry    = (value & mask) + (mask & -mask);
+    if (mask == 0) return value;
+    uint32_t carry = (value & mask) + (mask & -mask);
     uint32_t overflow = carry & ~mask;
     uint32_t new_value = (value & ~mask) | (carry & mask);
-
     if (overflow > 0) {
         uint32_t carry_mask = (overflow << 1);
         new_value = increment_bitmask(new_value, carry_mask);
     }
-
     return new_value;
 }
