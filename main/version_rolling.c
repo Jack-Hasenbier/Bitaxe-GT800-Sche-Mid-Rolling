@@ -5,9 +5,9 @@
 
 static const char *TAG = "version_rolling";
 
-#define ADJUST_INTERVAL_MS   (10 * 60 * 1000)
-#define MIN_SHARES_BEFORE_ADJUST 50
-
+#define ADJUST_INTERVAL_MS   (10 * 60 * 1000)   // Alle 10 Minuten anpassen, abhängig von der Hashrate und der Anzahl der Shares
+#define MIN_SHARES_BEFORE_ADJUST 5              // Hashrate abhängig, aber mindestens 5 Shares, bevor Anpassung erfolgt
+                                                // in etwas 20 anpassungen in der Stunden, abhängig von shares/h
 static struct {
     uint32_t version_mask;
     uint32_t success_count[4];
@@ -60,14 +60,15 @@ void version_rolling_adjust(void) {
         }
     }
 
-    if (memcmp(vr.order, new_order, 4) != 0) {
-        ESP_LOGI(TAG, "Optimizing midstate order: %d%d%d%d -> %d%d%d%d (success: %lu/%lu/%lu/%lu)",
-                 vr.order[0], vr.order[1], vr.order[2], vr.order[3],
-                 new_order[0], new_order[1], new_order[2], new_order[3],
-                 vr.success_count[0], vr.success_count[1],
-                 vr.success_count[2], vr.success_count[3]);
-        memcpy(vr.order, new_order, 4);
-    }
+if (memcmp(vr.order, new_order, 4) != 0) {
+    // Magenta Farbe: \033[35m, Reset: \033[0m (Standardfarbe)
+    ESP_LOGI(TAG, "\033[35mOptimizing midstate order: %d%d%d%d -> %d%d%d%d (success: %lu/%lu/%lu/%lu)\033[0m",
+             vr.order[0], vr.order[1], vr.order[2], vr.order[3],
+             new_order[0], new_order[1], new_order[2], new_order[3],
+             vr.success_count[0], vr.success_count[1],
+             vr.success_count[2], vr.success_count[3]);
+    memcpy(vr.order, new_order, 4);
+}
 
     memset(vr.success_count, 0, sizeof(vr.success_count));
     vr.total_shares = 0;
