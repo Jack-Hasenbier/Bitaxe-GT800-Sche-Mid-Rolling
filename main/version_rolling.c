@@ -47,12 +47,9 @@ void version_rolling_adjust(void) {
     bool time_elapsed = (now - vr.last_adjust_time_us >= ADJUST_INTERVAL_MS * 1000LL);
     bool enough_shares = (vr.total_shares >= MIN_SHARES_BEFORE_ADJUST);
 
-    // Nur zurückkehren, wenn weder Zeit noch Shares erfüllt sind
-    if (!time_elapsed && !enough_shares) {
-        return;
-    }
+    if (!time_elapsed && !enough_shares) return;  // Weder Zeit noch Shares → nichts tun
 
-    // Optimierung durchführen
+    // Ab hier optimieren
     uint32_t counts[4];
     memcpy(counts, vr.success_count, sizeof(counts));
     uint8_t new_order[4] = {0,1,2,3};
@@ -67,16 +64,14 @@ void version_rolling_adjust(void) {
     }
 
     if (memcmp(vr.order, new_order, 4) != 0) {
-        
         ESP_LOGI(TAG, "Optimizing midstate order: %d%d%d%d -> %d%d%d%d (success: %lu/%lu/%lu/%lu)",
-         vr.order[0], vr.order[1], vr.order[2], vr.order[3],
-         new_order[0], new_order[1], new_order[2], new_order[3],
-         vr.success_count[0], vr.success_count[1],
-         vr.success_count[2], vr.success_count[3]);
+                 vr.order[0], vr.order[1], vr.order[2], vr.order[3],
+                 new_order[0], new_order[1], new_order[2], new_order[3],
+                 vr.success_count[0], vr.success_count[1],
+                 vr.success_count[2], vr.success_count[3]);
         memcpy(vr.order, new_order, 4);
     }
 
-    // Zähler zurücksetzen und Zeitstempel aktualisieren
     memset(vr.success_count, 0, sizeof(vr.success_count));
     vr.total_shares = 0;
     vr.last_adjust_time_us = now;
