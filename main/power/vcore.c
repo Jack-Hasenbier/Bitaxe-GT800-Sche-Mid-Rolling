@@ -51,7 +51,7 @@ static TPS546_CONFIG TPS546_CONFIG_GAMMATURBO = {
     // unnötige power_fault-Events bei kurzen Netzspannungseinbrüchen.
     .TPS546_INIT_VIN_UV_WARN_LIMIT   = 10.5,
     .TPS546_INIT_VIN_OV_FAULT_LIMIT  = 14.0,
-    .TPS546_INIT_SCALE_LOOP          = 0.50,  //  0,25 instabil, test mit 0,5 → stabil, aber langsameres Ansprechverhalten ???
+    .TPS546_INIT_SCALE_LOOP          = 1.00,  //  0.25 instabil, test mit 1.00 → stabil, aber langsameres Ansprechverhalten ???
     .TPS546_INIT_VOUT_MIN            = 1,
     .TPS546_INIT_VOUT_MAX            = 3,
     .TPS546_INIT_VOUT_COMMAND        = 1.2,
