@@ -49,7 +49,11 @@ void version_rolling_adjust(void) {
 
     if (!time_elapsed && !enough_shares) return;  // Weder Zeit noch Shares → nichts tun
 
-    // Ab hier optimieren
+    // Immer loggen, dass ein Adjust durchgeführt wird (auch wenn keine Änderung)
+    ESP_LOGI(TAG, "Version rolling adjust triggered (time_elapsed=%d, enough_shares=%d, total_shares=%lu)",
+             time_elapsed, enough_shares, vr.total_shares);
+
+    // Reihenfolge optimieren
     uint32_t counts[4];
     memcpy(counts, vr.success_count, sizeof(counts));
     uint8_t new_order[4] = {0,1,2,3};
@@ -70,8 +74,12 @@ void version_rolling_adjust(void) {
                  vr.success_count[0], vr.success_count[1],
                  vr.success_count[2], vr.success_count[3]);
         memcpy(vr.order, new_order, 4);
+    } else {
+        // Optionale Debug-Meldung, falls unverändert – kann auch weggelassen werden
+        ESP_LOGD(TAG, "Order unchanged, still %d%d%d%d", vr.order[0], vr.order[1], vr.order[2], vr.order[3]);
     }
 
+    // Zähler und Timer zurücksetzen
     memset(vr.success_count, 0, sizeof(vr.success_count));
     vr.total_shares = 0;
     vr.last_adjust_time_us = now;
