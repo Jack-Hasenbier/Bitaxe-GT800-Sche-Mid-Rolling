@@ -18,7 +18,10 @@
 #include <pthread.h>
 #include <fcntl.h>
 
-// ---------- Ergänzung: Definition des fehlenden Typs ----------
+// ---------- Externe Stratum-API-Variable ----------
+extern StratumApiV1Message stratum_api_v1_message;
+
+// ---------- Definition des fehlenden Typs ----------
 typedef struct {
     struct sockaddr_storage dest_addr;
     socklen_t addrlen;
@@ -27,7 +30,7 @@ typedef struct {
     char host_ip[INET6_ADDRSTRLEN + 16];
 } stratum_connection_info_t;
 
-// ---------- Ergänzung: fehlende globale Variablen ----------
+// ---------- Fehlende globale Variablen ----------
 static const char *primary_stratum_url = NULL;
 static uint16_t primary_stratum_port = 0;
 
@@ -36,12 +39,11 @@ static uint16_t primary_stratum_port = 0;
 #define MAX_CRITICAL_RETRY_ATTEMPTS     5
 #define MAX_EXTRANONCE_2_LEN            32
 #define BUFFER_SIZE                     1024
-#define DNS_CACHE_TTL_SEC               300          // 5 Minuten
+#define DNS_CACHE_TTL_SEC               300
 #define CONNECT_TIMEOUT_SEC             10
 #define HEARTBEAT_INTERVAL_MS           10000
 #define HEARTBEAT_RETRY_DELAY_MS        60000
 
-// Coinbase-Offsets (Bitcoin-spezifisch)
 #define COINBASE_VERSION_LEN            4
 #define COINBASE_INPUT_COUNT_LEN        1
 #define COINBASE_PREV_HASH_LEN          32
@@ -54,7 +56,6 @@ static const char * TAG = "stratum_task";
 // ---------- Statische Hilfsfunktionen ----------
 static bool s_wifi_connected = false;
 
-// DNS-Cache
 typedef struct {
     char hostname[256];
     uint16_t port;
@@ -67,11 +68,8 @@ typedef struct {
 } dns_cache_entry_t;
 
 static dns_cache_entry_t s_dns_cache = {0};
-
-// Mutex für gemeinsam genutzte Ressourcen (extranonce_str, scriptsig, sock, abandon_work)
 static pthread_mutex_t s_stratum_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// ---------- Lokale Hilfsfunktionen ----------
 static bool is_wifi_connected_fast(void) {
     return s_wifi_connected;
 }
@@ -80,7 +78,6 @@ void stratum_set_wifi_connected(bool connected) {
     s_wifi_connected = connected;
 }
 
-// DNS-Auflösung mit Caching
 static esp_err_t resolve_stratum_address_cached(const char *hostname, uint16_t port,
                                                 stratum_connection_info_t *conn_info) {
     time_t now = time(NULL);
@@ -515,20 +512,20 @@ void stratum_task(void * pvParameters) {
                 break;
             }
 
-            double response_time_ms = STRATUM_V1_get_response_time_ms(StratumApiV1Message.message_id);
+            double response_time_ms = STRATUM_V1_get_response_time_ms(stratum_api_v1_message.message_id);
             if (response_time_ms >= 0) {
                 ESP_LOGI(TAG, "Stratum response time: %.2f ms", response_time_ms);
                 GLOBAL_STATE->SYSTEM_MODULE.response_time = response_time_ms;
             }
 
-            STRATUM_V1_parse(&StratumApiV1Message, line);
+            STRATUM_V1_parse(&stratum_api_v1_message, line);
             free(line);
 
-            if (StratumApiV1Message.method == MINING_NOTIFY) {
+            if (stratum_api_v1_message.method == MINING_NOTIFY) {
                 GLOBAL_STATE->SYSTEM_MODULE.work_received++;
-                SYSTEM_notify_new_ntime(GLOBAL_STATE, StratumApiV1Message.mining_notification->ntime);
+                SYSTEM_notify_new_ntime(GLOBAL_STATE, stratum_api_v1_message.mining_notification->ntime);
 
-                if (StratumApiV1Message.should_abandon_work) {
+                if (stratum_api_v1_message.should_abandon_work) {
                     pthread_mutex_lock(&s_stratum_mutex);
                     bool abandon = (GLOBAL_STATE->stratum_queue.count > 0 || GLOBAL_STATE->ASIC_jobs_queue.count > 0);
                     pthread_mutex_unlock(&s_stratum_mutex);
@@ -541,58 +538,58 @@ void stratum_task(void * pvParameters) {
                     mining_notify *old = (mining_notify*) queue_dequeue(&GLOBAL_STATE->stratum_queue);
                     STRATUM_V1_free_mining_notify(old);
                 }
-                queue_enqueue(&GLOBAL_STATE->stratum_queue, StratumApiV1Message.mining_notification);
-                decode_mining_notification(GLOBAL_STATE, StratumApiV1Message.mining_notification);
+                queue_enqueue(&GLOBAL_STATE->stratum_queue, stratum_api_v1_message.mining_notification);
+                decode_mining_notification(GLOBAL_STATE, stratum_api_v1_message.mining_notification);
             }
-            else if (StratumApiV1Message.method == MINING_SET_DIFFICULTY) {
-                ESP_LOGI(TAG, "Set pool difficulty: %ld", StratumApiV1Message.new_difficulty);
-                GLOBAL_STATE->pool_difficulty = StratumApiV1Message.new_difficulty;
+            else if (stratum_api_v1_message.method == MINING_SET_DIFFICULTY) {
+                ESP_LOGI(TAG, "Set pool difficulty: %ld", stratum_api_v1_message.new_difficulty);
+                GLOBAL_STATE->pool_difficulty = stratum_api_v1_message.new_difficulty;
                 GLOBAL_STATE->new_set_mining_difficulty_msg = true;
             }
-            else if (StratumApiV1Message.method == MINING_SET_VERSION_MASK ||
-                     StratumApiV1Message.method == STRATUM_RESULT_VERSION_MASK) {
-                ESP_LOGI(TAG, "Set version mask: %08lx", StratumApiV1Message.version_mask);
-                GLOBAL_STATE->version_mask = StratumApiV1Message.version_mask;
+            else if (stratum_api_v1_message.method == MINING_SET_VERSION_MASK ||
+                     stratum_api_v1_message.method == STRATUM_RESULT_VERSION_MASK) {
+                ESP_LOGI(TAG, "Set version mask: %08lx", stratum_api_v1_message.version_mask);
+                GLOBAL_STATE->version_mask = stratum_api_v1_message.version_mask;
                 GLOBAL_STATE->new_stratum_version_rolling_msg = true;
             }
-            else if (StratumApiV1Message.method == MINING_SET_EXTRANONCE ||
-                     StratumApiV1Message.method == STRATUM_RESULT_SUBSCRIBE) {
-                if (StratumApiV1Message.extranonce_2_len > MAX_EXTRANONCE_2_LEN) {
+            else if (stratum_api_v1_message.method == MINING_SET_EXTRANONCE ||
+                     stratum_api_v1_message.method == STRATUM_RESULT_SUBSCRIBE) {
+                if (stratum_api_v1_message.extranonce_2_len > MAX_EXTRANONCE_2_LEN) {
                     ESP_LOGW(TAG, "Extranonce_2_len %d exceeds maximum %d, clamping",
-                             StratumApiV1Message.extranonce_2_len, MAX_EXTRANONCE_2_LEN);
-                    StratumApiV1Message.extranonce_2_len = MAX_EXTRANONCE_2_LEN;
+                             stratum_api_v1_message.extranonce_2_len, MAX_EXTRANONCE_2_LEN);
+                    stratum_api_v1_message.extranonce_2_len = MAX_EXTRANONCE_2_LEN;
                 }
                 ESP_LOGI(TAG, "Set extranonce: %s, extranonce_2_len: %d",
-                         StratumApiV1Message.extranonce_str, StratumApiV1Message.extranonce_2_len);
-                set_string_mutex(&GLOBAL_STATE->extranonce_str, StratumApiV1Message.extranonce_str);
-                GLOBAL_STATE->extranonce_2_len = StratumApiV1Message.extranonce_2_len;
+                         stratum_api_v1_message.extranonce_str, stratum_api_v1_message.extranonce_2_len);
+                set_string_mutex(&GLOBAL_STATE->extranonce_str, stratum_api_v1_message.extranonce_str);
+                GLOBAL_STATE->extranonce_2_len = stratum_api_v1_message.extranonce_2_len;
             }
-            else if (StratumApiV1Message.method == CLIENT_RECONNECT) {
+            else if (stratum_api_v1_message.method == CLIENT_RECONNECT) {
                 ESP_LOGE(TAG, "Pool requested client reconnect...");
                 stratum_close_connection(GLOBAL_STATE);
                 break;
             }
-            else if (StratumApiV1Message.method == STRATUM_RESULT) {
-                if (StratumApiV1Message.response_success) {
+            else if (stratum_api_v1_message.method == STRATUM_RESULT) {
+                if (stratum_api_v1_message.response_success) {
                     ESP_LOGI(TAG, "message result accepted");
                     SYSTEM_notify_accepted_share(GLOBAL_STATE);
                 } else {
-                    ESP_LOGW(TAG, "message result rejected: %s", StratumApiV1Message.error_str);
-                    SYSTEM_notify_rejected_share(GLOBAL_STATE, StratumApiV1Message.error_str);
+                    ESP_LOGW(TAG, "message result rejected: %s", stratum_api_v1_message.error_str);
+                    SYSTEM_notify_rejected_share(GLOBAL_STATE, stratum_api_v1_message.error_str);
                 }
             }
-            else if (StratumApiV1Message.method == STRATUM_RESULT_SETUP) {
+            else if (stratum_api_v1_message.method == STRATUM_RESULT_SETUP) {
                 retry_attempts = 0;
-                if (StratumApiV1Message.response_success) {
+                if (stratum_api_v1_message.response_success) {
                     ESP_LOGI(TAG, "setup message accepted");
-                    if (StratumApiV1Message.message_id == authorize_message_id && difficulty > 0) {
+                    if (stratum_api_v1_message.message_id == authorize_message_id && difficulty > 0) {
                         STRATUM_V1_suggest_difficulty(sock, GLOBAL_STATE->send_uid++, difficulty);
                     }
                     if (extranonce_subscribe) {
                         STRATUM_V1_extranonce_subscribe(sock, GLOBAL_STATE->send_uid++);
                     }
                 } else {
-                    ESP_LOGE(TAG, "setup message rejected: %s", StratumApiV1Message.error_str);
+                    ESP_LOGE(TAG, "setup message rejected: %s", stratum_api_v1_message.error_str);
                 }
             }
         }
