@@ -155,7 +155,7 @@ char * STRATUM_V1_receive_jsonrpc_line(int sockfd)
 
 void STRATUM_V1_parse(StratumApiV1Message * message, const char * stratum_json)
 {
-    ESP_LOGI(TAG, "rx: %s", stratum_json); // debug incoming stratum messages
+    //ESP_LOGI(TAG, "rx: %s", stratum_json); // debug incoming stratum messages
 
     cJSON * json = cJSON_Parse(stratum_json);
 
@@ -455,7 +455,7 @@ static void debug_stratum_tx(const char * msg)
     if (newline != NULL) {
         *newline = '\0';
     }
-    ESP_LOGI(TAG, "tx: %s", msg);
+    //ESP_LOGI(TAG, "tx: %s", msg);
 
     //put it back!
     if (newline != NULL) {
