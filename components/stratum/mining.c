@@ -12,7 +12,6 @@
 #include "mbedtls/sha256.h"
 #include "esp_log.h"
 #include "version_rolling.h"
-
 static const char *TAG = "mining";
 
 void free_bm_job(bm_job *job)
