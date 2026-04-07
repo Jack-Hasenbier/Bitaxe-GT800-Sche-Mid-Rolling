@@ -6,9 +6,7 @@
 //      (z.B. Auto-Fan-Speed schreibt Frequenz und Spannung im selben
 //      Zyklus) kann die Queue bei 20 Einträgen volllaufen. 40 Einträge
 //      puffern Bursts ohne Blocking.
-//   2. nvs_task Stack: 8192 → 4096 Bytes.
-//      Der Task macht nur einfache NVS-Schreiboperationen + Strings.
-//      8 KB Stack war überdimensioniert. 4 KB spart IRAM/DRAM.
+
 //   3. nvs_config_set_*: xQueueSend-Ergebnis prüfen und loggen.
 //      Original ignorierte Queue-Full-Fehler silently → Konfiguration
 //      schien gespeichert, wurde aber verworfen.
@@ -317,8 +315,8 @@ esp_err_t nvs_config_init(void)
     }
 
     TaskHandle_t task_handle;
-    // [OPT-2] Stack auf 4096 reduziert (war 8192, Task braucht keine großen lokalen Puffer)
-    BaseType_t task_result = xTaskCreate(nvs_task, "nvs_task", 4096, NULL, 5, &task_handle);
+
+    BaseType_t task_result = xTaskCreate(nvs_task, "nvs_task", 8192, NULL, 5, &task_handle);
     if (task_result != pdPASS) {
         ESP_LOGE(TAG, "Failed to create nvs_task");
         return ESP_FAIL;

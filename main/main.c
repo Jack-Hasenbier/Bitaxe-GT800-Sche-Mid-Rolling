@@ -1,6 +1,9 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_psram.h"
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "asic_result_task.h"
 #include "asic_task.h"
@@ -24,13 +27,40 @@
 #include "../../main/version_rolling.h"   // Dynamisches Version‑Rolling
 
 static GlobalState GLOBAL_STATE;
-
 static const char * TAG = "bitaxe";
+
+// ========== Optimierte Task‑Prioritäten ==========
+// Höhere Zahl = höhere Priorität
+#define PRIO_ASIC_RESULT        15   // Nonce‑Ergebnisse sofort verarbeiten
+#define PRIO_ASIC               12   // ASIC‑Kommunikation (timing‑kritisch)
+#define PRIO_STRATUM_MINER      8    // Erzeugt Jobs aus Stratum‑Shares
+#define PRIO_POWER_MANAGEMENT   7    // Stromregelung (wichtig, aber nicht kritisch)
+#define PRIO_STRATUM_ADMIN      5    // Verbindungsmanagement (periodisch)
+#define PRIO_HASHRATE_MONITOR   4    // Nur Statistik
+#define PRIO_STATISTICS         3    // Niedrigste Priorität
+
+// ========== Optimierte Stack‑Größen (in Bytes) ==========
+#define STACK_POWER_MANAGEMENT  8192
+#define STACK_STRATUM_ADMIN     12288
+#define STACK_STRATUM_MINER     10240
+#define STACK_ASIC              12288
+#define STACK_ASIC_RESULT       12288
+#define STACK_HASHRATE_MONITOR  8192
+#define STACK_STATISTICS        8192
+
+// ========== Hilfsmakro für kritische Task‑Erstellung ==========
+#define CHECK_TASK(expr, task_name) do { \
+    if ((expr) != pdPASS) { \
+        ESP_LOGE(TAG, "FATAL: Failed to create task '%s'", task_name); \
+        esp_restart(); \
+    } \
+} while(0)
 
 void app_main(void)
 {
     ESP_LOGI(TAG, "Welcome to the bitaxe - FOSS || GTFO!");
 
+    // PSRAM‑Prüfung
     if (!esp_psram_is_initialized()) {
         ESP_LOGE(TAG, "No PSRAM available on ESP32 device!");
         GLOBAL_STATE.psram_is_available = false;
@@ -38,22 +68,19 @@ void app_main(void)
         GLOBAL_STATE.psram_is_available = true;
     }
 
-    // Init I2C
+    // I2C initialisieren
     ESP_ERROR_CHECK(i2c_bitaxe_init());
     ESP_LOGI(TAG, "I2C initialized successfully");
-    
-    // Initialize RST pin to low early to minimize ASIC power consumption
+
+    // ASIC‑Reset auf Low halten (stromsparend)
     ESP_ERROR_CHECK(asic_hold_reset_low());
     ESP_LOGI(TAG, "RST pin initialized to low");
 
-    //wait for I2C to init
-    vTaskDelay(100 / portTICK_PERIOD_MS);
+    vTaskDelay(100 / portTICK_PERIOD_MS); // I2C‑Stabilisierung
 
-    //Init ADC
     ADC_init();
 
-    //initialize the ESP32 NVS
-    if (nvs_config_init() != ESP_OK){
+    if (nvs_config_init() != ESP_OK) {
         ESP_LOGE(TAG, "Failed to init NVS");
         return;
     }
@@ -63,14 +90,11 @@ void app_main(void)
         return;
     }
 
-    // [VR] Dynamisches Version‑Rolling initialisieren
     version_rolling_init();
 
     if (self_test(&GLOBAL_STATE)) return;
 
     SYSTEM_init_system(&GLOBAL_STATE);
-
-    // init AP and connect to wifi
     wifi_init(&GLOBAL_STATE);
 
     if (SYSTEM_init_peripherals(&GLOBAL_STATE) != ESP_OK) {
@@ -78,47 +102,71 @@ void app_main(void)
         return;
     }
 
-    if (xTaskCreate(POWER_MANAGEMENT_task, "power management", 9216, (void *) &GLOBAL_STATE, 10, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "Error creating power management task");
-    }
+    // Power‑Management‑Task (Priorität 7, Stack 8k)
+    CHECK_TASK(xTaskCreate(POWER_MANAGEMENT_task, "power mgmt",
+                           STACK_POWER_MANAGEMENT, &GLOBAL_STATE,
+                           PRIO_POWER_MANAGEMENT, NULL), "power mgmt");
 
-    //start the API for AxeOS
-    start_rest_server((void *) &GLOBAL_STATE);
+    // REST‑API starten (läuft im eigenen Task des HTTP‑Servers)
+    start_rest_server(&GLOBAL_STATE);
 
-    // Initialize BAP interface
+    // BAP‑Interface (optional)
     esp_err_t bap_ret = BAP_init(&GLOBAL_STATE);
     if (bap_ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize BAP interface: %d", bap_ret);
-        // Continue anyway, as BAP is not critical for core functionality
+        // Nicht kritisch → weiter
     }
 
-    while (!GLOBAL_STATE.SYSTEM_MODULE.is_connected) {
+    // Warten auf Netzwerkverbindung mit Timeout (30 Sekunden)
+    int timeout_ms = 30000;
+    while (!GLOBAL_STATE.SYSTEM_MODULE.is_connected && timeout_ms > 0) {
         vTaskDelay(100 / portTICK_PERIOD_MS);
+        timeout_ms -= 100;
+    }
+    if (!GLOBAL_STATE.SYSTEM_MODULE.is_connected) {
+        ESP_LOGW(TAG, "No network connection after 30s – continuing in AP mode");
     }
 
     queue_init(&GLOBAL_STATE.stratum_queue);
     queue_init(&GLOBAL_STATE.ASIC_jobs_queue);
 
     if (asic_initialize(&GLOBAL_STATE, ASIC_INIT_COLD_BOOT, 0) == 0) {
-        return;
+        ESP_LOGE(TAG, "ASIC initialization failed – restarting");
+        esp_restart();
     }
 
-    if (xTaskCreate(stratum_task, "stratum admin", 10240, (void *) &GLOBAL_STATE, 5, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "Error creating stratum admin task");
-    }
-    if (xTaskCreate(create_jobs_task, "stratum miner", 8192, (void *) &GLOBAL_STATE, 10, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "Error creating stratum miner task");
-    }
-    if (xTaskCreate(ASIC_task, "asic", 12288, (void *) &GLOBAL_STATE, 10, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "Error creating asic task");
-    }
-    if (xTaskCreate(ASIC_result_task, "asic result", 12288, (void *) &GLOBAL_STATE, 15, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "Error creating asic result task");
-    }
-    if (xTaskCreateWithCaps(hashrate_monitor_task, "hashrate monitor", 8192, (void *) &GLOBAL_STATE, 5, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
-        ESP_LOGE(TAG, "Error creating hashrate monitor task");
-    }
-    if (xTaskCreateWithCaps(statistics_task, "statistics", 8192, (void *) &GLOBAL_STATE, 3, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
-        ESP_LOGE(TAG, "Error creating statistics task");
-    }
+    // ========== Task‑Erstellung mit optimierten Parametern ==========
+    // stratum_admin (Priorität 5)
+    CHECK_TASK(xTaskCreate(stratum_task, "stratum admin",
+                           STACK_STRATUM_ADMIN, &GLOBAL_STATE,
+                           PRIO_STRATUM_ADMIN, NULL), "stratum admin");
+
+    // stratum_miner (Priorität 8)
+    CHECK_TASK(xTaskCreate(create_jobs_task, "stratum miner",
+                           STACK_STRATUM_MINER, &GLOBAL_STATE,
+                           PRIO_STRATUM_MINER, NULL), "stratum miner");
+
+    // ASIC‑Task (Priorität 12) – **kein** PSRAM, da zeitkritisch
+    CHECK_TASK(xTaskCreate(ASIC_task, "asic",
+                           STACK_ASIC, &GLOBAL_STATE,
+                           PRIO_ASIC, NULL), "asic");
+
+    // ASIC‑Result‑Task (Priorität 15) – höchste Priorität, kein PSRAM
+    CHECK_TASK(xTaskCreate(ASIC_result_task, "asic result",
+                           STACK_ASIC_RESULT, &GLOBAL_STATE,
+                           PRIO_ASIC_RESULT, NULL), "asic result");
+
+    // Hashrate‑Monitor (Priorität 4) – PSRAM erlaubt (langsamer, aber unkritisch)
+    CHECK_TASK(xTaskCreateWithCaps(hashrate_monitor_task, "hash mon",
+                                   STACK_HASHRATE_MONITOR, &GLOBAL_STATE,
+                                   PRIO_HASHRATE_MONITOR, NULL, MALLOC_CAP_SPIRAM),
+                                   "hash mon");
+
+    // Statistik‑Task (Priorität 3) – PSRAM erlaubt
+    CHECK_TASK(xTaskCreateWithCaps(statistics_task, "stats",
+                                   STACK_STATISTICS, &GLOBAL_STATE,
+                                   PRIO_STATISTICS, NULL, MALLOC_CAP_SPIRAM),
+                                   "stats");
+
+    ESP_LOGI(TAG, "All tasks created successfully – system running");
 }

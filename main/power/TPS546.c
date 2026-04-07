@@ -466,7 +466,20 @@ esp_err_t TPS546_check_status(GlobalState *GLOBAL_STATE) {
         if (SYSTEM_MODULE->power_fault) {
             ESP_LOGI(TAG, "Power fault resolved, clearing TPS546 fault registers");
             TPS546_clear_faults();
-            SYSTEM_MODULE->power_fault = 0;
+            vTaskDelay(pdMS_TO_TICKS(10));
+            uint16_t verify_status = 0;
+            if (smb_read_word(PMBUS_STATUS_WORD, &verify_status) == ESP_OK) {
+                if (verify_status & (TPS546_STATUS_OFF | TPS546_STATUS_VOUT_OV |
+                                     TPS546_STATUS_IOUT_OC | TPS546_STATUS_VIN_UV |
+                                     TPS546_STATUS_TEMP)) {
+                    ESP_LOGW(TAG, "Fault still active after clear (STATUS=0x%04X), not resolving", verify_status);
+                } else {
+                    ESP_LOGI(TAG, "Fault successfully cleared, STATUS=0x%04X", verify_status);
+                    SYSTEM_MODULE->power_fault = 0;
+                }
+            } else {
+                ESP_LOGW(TAG, "Could not verify fault clear, leaving power_fault set");
+            }
         }
     }
     return ESP_OK;

@@ -67,6 +67,16 @@ esp_err_t DS4432U_set_voltage(float vout) {
 
     ESP_RETURN_ON_ERROR(DS4432U_set_current_code(0, reg), TAG, "DS4432U set current code failed!");
 
+    uint8_t verify = 0;
+    if (DS4432U_get_current_code(0, &verify) != ESP_OK) {
+        ESP_LOGW(TAG, "DAC readback failed, cannot verify code");
+    } else if (verify != reg) {
+        ESP_LOGE(TAG, "DAC code mismatch: wrote 0x%02X, read 0x%02X", reg, verify);
+        return ESP_FAIL;
+    } else {
+        ESP_LOGD(TAG, "DAC code verified: 0x%02X", verify);
+    }
+
     return ESP_OK;
 }
 
