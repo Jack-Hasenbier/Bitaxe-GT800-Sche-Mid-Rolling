@@ -9,10 +9,8 @@ static i2c_master_dev_handle_t tmp1075_dev_handle[2];
 static int temp_offset = 0;
 static bool initialized = false;
 
-// Konvertierung des 12-Bit-Zweierkomplement-Werts (linksbündig im 16-Bit-Wort)
 static float convert_raw_to_celsius(uint16_t raw) {
-    int16_t val = (int16_t)(raw >> 4);       // 12-Bit-Wert, vorzeichenbehaftet
-    // Vorzeichenerweiterung von 12 auf 16 Bit
+    int16_t val = (int16_t)(raw >> 4);
     if (val & 0x0800) {
         val |= 0xF000;
     }

@@ -5,7 +5,8 @@
 #include "esp_check.h"
 #include "i2c_bitaxe.h"
 #include "driver/i2c_master.h"
-#include "freertos/FreeRTOS.h"   // für pdMS_TO_TICKS
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"      // für Mutex
 
 #define GPIO_I2C_SDA CONFIG_GPIO_I2C_SDA
 #define GPIO_I2C_SCL CONFIG_GPIO_I2C_SCL
@@ -15,6 +16,7 @@
 
 static const char *TAG = "i2c_bitaxe";
 static i2c_master_bus_handle_t i2c_bus_handle = NULL;
+static SemaphoreHandle_t i2c_mutex = NULL;   // Mutex für Threadsicherheit
 
 #define MAX_DEVICES 10
 typedef struct {
@@ -42,10 +44,18 @@ static esp_err_t log_on_error(esp_err_t err, i2c_master_dev_handle_t handle) {
     return err;
 }
 
+// Initialisierung des I2C-Master-Busses und des Mutex
 esp_err_t i2c_bitaxe_init(void) {
     if (i2c_bus_handle != NULL) {
         ESP_LOGW(TAG, "I2C bus already initialized");
         return ESP_OK;
+    }
+
+    // Mutex erstellen
+    i2c_mutex = xSemaphoreCreateMutex();
+    if (i2c_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create I2C mutex");
+        return ESP_ERR_NO_MEM;
     }
 
     i2c_master_bus_config_t i2c_bus_config = {
@@ -60,11 +70,33 @@ esp_err_t i2c_bitaxe_init(void) {
     esp_err_t err = i2c_new_master_bus(&i2c_bus_config, &i2c_bus_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create I2C master bus: %s", esp_err_to_name(err));
+        vSemaphoreDelete(i2c_mutex);
+        i2c_mutex = NULL;
         i2c_bus_handle = NULL;
     }
     return err;
 }
 
+// Hilfsfunktion: Mutex nehmen (mit unendlicher Wartezeit)
+static inline esp_err_t i2c_take_mutex(void) {
+    if (i2c_mutex == NULL) {
+        ESP_LOGE(TAG, "Mutex not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(i2c_mutex, portMAX_DELAY) != pdTRUE) {
+        ESP_LOGE(TAG, "Failed to take I2C mutex");
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
+}
+
+static inline void i2c_give_mutex(void) {
+    if (i2c_mutex != NULL) {
+        xSemaphoreGive(i2c_mutex);
+    }
+}
+
+// Gerät hinzufügen (benutzt den Bus, daher Mutex-sicher)
 esp_err_t i2c_bitaxe_add_device(uint8_t device_address, i2c_master_dev_handle_t *dev_handle, const char *device_tag) {
     if (dev_handle == NULL) {
         ESP_LOGE(TAG, "dev_handle is NULL");
@@ -85,12 +117,18 @@ esp_err_t i2c_bitaxe_add_device(uint8_t device_address, i2c_master_dev_handle_t 
         .scl_speed_hz = I2C_BUS_SPEED_HZ,
     };
 
-    esp_err_t err = i2c_master_bus_add_device(i2c_bus_handle, &dev_cfg, dev_handle);
+    esp_err_t err;
+    // Bus-Zugriff durch Mutex schützen
+    if ((err = i2c_take_mutex()) != ESP_OK) return err;
+    err = i2c_master_bus_add_device(i2c_bus_handle, &dev_cfg, dev_handle);
+    i2c_give_mutex();
+
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to add device 0x%02x: %s", device_address, esp_err_to_name(err));
         return err;
     }
 
+    // In Map eintragen (kein Bus-Zugriff, daher kein Mutex nötig)
     i2c_device_map[i2c_device_count].handle = *dev_handle;
     i2c_device_map[i2c_device_count].device_address = device_address;
     strncpy(i2c_device_map[i2c_device_count].device_tag, device_tag,
@@ -107,36 +145,62 @@ esp_err_t i2c_bitaxe_get_master_bus_handle(i2c_master_bus_handle_t *dev_handle) 
     return (i2c_bus_handle == NULL) ? ESP_ERR_INVALID_STATE : ESP_OK;
 }
 
+// I2C-Read mit Mutex
 esp_err_t i2c_bitaxe_register_read(i2c_master_dev_handle_t dev_handle, uint8_t reg_addr, uint8_t *read_buf, size_t len) {
     if (dev_handle == NULL) return ESP_ERR_INVALID_ARG;
     if (read_buf == NULL && len > 0) return ESP_ERR_INVALID_ARG;
-    esp_err_t err = i2c_master_transmit_receive(dev_handle, &reg_addr, 1, read_buf, len, I2C_TIMEOUT_TICKS);
+
+    esp_err_t err;
+    if ((err = i2c_take_mutex()) != ESP_OK) return err;
+    err = i2c_master_transmit_receive(dev_handle, &reg_addr, 1, read_buf, len, I2C_TIMEOUT_TICKS);
+    i2c_give_mutex();
+
     return log_on_error(err, dev_handle);
 }
 
 esp_err_t i2c_bitaxe_register_write_addr(i2c_master_dev_handle_t dev_handle, uint8_t reg_addr) {
     if (dev_handle == NULL) return ESP_ERR_INVALID_ARG;
-    esp_err_t err = i2c_master_transmit(dev_handle, &reg_addr, 1, I2C_TIMEOUT_TICKS);
+
+    esp_err_t err;
+    if ((err = i2c_take_mutex()) != ESP_OK) return err;
+    err = i2c_master_transmit(dev_handle, &reg_addr, 1, I2C_TIMEOUT_TICKS);
+    i2c_give_mutex();
+
     return log_on_error(err, dev_handle);
 }
 
 esp_err_t i2c_bitaxe_register_write_byte(i2c_master_dev_handle_t dev_handle, uint8_t reg_addr, uint8_t data) {
     if (dev_handle == NULL) return ESP_ERR_INVALID_ARG;
     uint8_t write_buf[2] = {reg_addr, data};
-    esp_err_t err = i2c_master_transmit(dev_handle, write_buf, 2, I2C_TIMEOUT_TICKS);
+
+    esp_err_t err;
+    if ((err = i2c_take_mutex()) != ESP_OK) return err;
+    err = i2c_master_transmit(dev_handle, write_buf, 2, I2C_TIMEOUT_TICKS);
+    i2c_give_mutex();
+
     return log_on_error(err, dev_handle);
 }
 
 esp_err_t i2c_bitaxe_register_write_bytes(i2c_master_dev_handle_t dev_handle, uint8_t *data, uint8_t len) {
     if (dev_handle == NULL) return ESP_ERR_INVALID_ARG;
     if (data == NULL && len > 0) return ESP_ERR_INVALID_ARG;
-    esp_err_t err = i2c_master_transmit(dev_handle, data, len, I2C_TIMEOUT_TICKS);
+
+    esp_err_t err;
+    if ((err = i2c_take_mutex()) != ESP_OK) return err;
+    err = i2c_master_transmit(dev_handle, data, len, I2C_TIMEOUT_TICKS);
+    i2c_give_mutex();
+
     return log_on_error(err, dev_handle);
 }
 
 esp_err_t i2c_bitaxe_register_write_word(i2c_master_dev_handle_t dev_handle, uint8_t reg_addr, uint16_t data) {
     if (dev_handle == NULL) return ESP_ERR_INVALID_ARG;
     uint8_t write_buf[3] = {reg_addr, (uint8_t)(data & 0xFF), (uint8_t)((data >> 8) & 0xFF)};
-    esp_err_t err = i2c_master_transmit(dev_handle, write_buf, 3, I2C_TIMEOUT_TICKS);
+
+    esp_err_t err;
+    if ((err = i2c_take_mutex()) != ESP_OK) return err;
+    err = i2c_master_transmit(dev_handle, write_buf, 3, I2C_TIMEOUT_TICKS);
+    i2c_give_mutex();
+
     return log_on_error(err, dev_handle);
 }

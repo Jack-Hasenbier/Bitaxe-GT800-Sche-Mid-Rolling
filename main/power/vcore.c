@@ -12,12 +12,19 @@
 //          bekommt kurz instabile Spannung → Hash-Domains fallen
 //          aus → hashrate_monitor triggert Reinitiate.
 //          10.5V entspricht VIN_OFF und gibt ausreichend Puffer.
+//
+//   - Initialisierungsflag `vcore_initialized` verhindert
+//     Nutzung der Funktionen vor erfolgreicher Init.
+//   - Prüfung des Initialisierungsflags in allen öffentlichen
+//     Funktionen (außer VCORE_get_fault_string, die auch ohne
+//     Init einen String zurückgeben kann).
+//   - Fehlerpropagierung bleibt erhalten.
 // ============================================================
 
 #include <stdio.h>
 #include <math.h>
 #include "esp_log.h"
-
+#include "esp_check.h"
 #include "vcore.h"
 #include "adc.h"
 #include "DS4432U.h"
@@ -29,11 +36,12 @@
 #define GPIO_PLUG_SENSE  CONFIG_GPIO_PLUG_SENSE
 
 static const char *TAG = "vcore";
+static bool vcore_initialized = false;   // Status der VCORE-Initialisierung
 
 static TPS546_CONFIG TPS546_CONFIG_DEFAULT = {
     .TPS546_INIT_VIN_ON              = 4.8,
     .TPS546_INIT_VIN_OFF             = 4.0,
-    .TPS546_INIT_VIN_UV_WARN_LIMIT   = 0,   // Set to 0 to ignore. TI Bug in this register
+    .TPS546_INIT_VIN_UV_WARN_LIMIT   = 0,
     .TPS546_INIT_VIN_OV_FAULT_LIMIT  = 6.5,
     .TPS546_INIT_SCALE_LOOP          = 0.25,
     .TPS546_INIT_VOUT_MIN            = 1,
@@ -46,10 +54,7 @@ static TPS546_CONFIG TPS546_CONFIG_DEFAULT = {
 static TPS546_CONFIG TPS546_CONFIG_GAMMATURBO = {
     .TPS546_INIT_VIN_ON              = 11.0,
     .TPS546_INIT_VIN_OFF             = 10.5,
-    // [FIX-1] War 11.0V = identisch mit VIN_ON → false-positive VIN_UV bei
-    // jedem Lasteinbruch. 10.5V = VIN_OFF gibt 0.5V Puffer, verhindert
-    // unnötige power_fault-Events bei kurzen Netzspannungseinbrüchen.
-    .TPS546_INIT_VIN_UV_WARN_LIMIT   = 10.5,
+    .TPS546_INIT_VIN_UV_WARN_LIMIT   = 10.5,   // Puffer unter VIN_ON
     .TPS546_INIT_VIN_OV_FAULT_LIMIT  = 14.0,
     .TPS546_INIT_SCALE_LOOP          = 0.25,
     .TPS546_INIT_VOUT_MIN            = 1,
@@ -74,6 +79,11 @@ static TPS546_CONFIG TPS546_CONFIG_HEX = {
 
 esp_err_t VCORE_init(GlobalState * GLOBAL_STATE)
 {
+    if (vcore_initialized) {
+        ESP_LOGW(TAG, "VCORE already initialized");
+        return ESP_OK;
+    }
+
     ESP_RETURN_ON_FALSE(GLOBAL_STATE->DEVICE_CONFIG.family.voltage_domains != 0,
                         ESP_FAIL, TAG, "voltage_domains not defined");
 
@@ -114,11 +124,17 @@ esp_err_t VCORE_init(GlobalState * GLOBAL_STATE)
         }
     }
 
+    vcore_initialized = true;
     return ESP_OK;
 }
 
 esp_err_t VCORE_set_voltage(GlobalState * GLOBAL_STATE, float core_voltage)
 {
+    if (!vcore_initialized) {
+        ESP_LOGE(TAG, "VCORE not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     ESP_LOGI(TAG, "Set ASIC voltage = %.3fV", core_voltage);
 
     if (GLOBAL_STATE->DEVICE_CONFIG.DS4432U) {
@@ -139,6 +155,11 @@ esp_err_t VCORE_set_voltage(GlobalState * GLOBAL_STATE, float core_voltage)
 
 int16_t VCORE_get_voltage_mv(GlobalState * GLOBAL_STATE)
 {
+    if (!vcore_initialized) {
+        ESP_LOGE(TAG, "VCORE not initialized");
+        return 0;
+    }
+
     if (GLOBAL_STATE->DEVICE_CONFIG.TPS546) {
         return TPS546_get_vout() / GLOBAL_STATE->DEVICE_CONFIG.family.voltage_domains * 1000;
     }
@@ -147,6 +168,11 @@ int16_t VCORE_get_voltage_mv(GlobalState * GLOBAL_STATE)
 
 esp_err_t VCORE_check_fault(GlobalState * GLOBAL_STATE)
 {
+    if (!vcore_initialized) {
+        ESP_LOGE(TAG, "VCORE not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     if (GLOBAL_STATE->DEVICE_CONFIG.TPS546) {
         ESP_RETURN_ON_ERROR(TPS546_check_status(GLOBAL_STATE), TAG, "TPS546 check status failed!");
     }
@@ -155,6 +181,7 @@ esp_err_t VCORE_check_fault(GlobalState * GLOBAL_STATE)
 
 const char* VCORE_get_fault_string(GlobalState * GLOBAL_STATE)
 {
+    // Auch ohne Init kann der String abgefragt werden (statische Fehlermeldung)
     if (GLOBAL_STATE->DEVICE_CONFIG.TPS546) {
         return TPS546_get_error_message();
     }

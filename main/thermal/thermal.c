@@ -1,24 +1,22 @@
 #include "thermal.h"
-
 #include "esp_log.h"
 #include "esp_check.h"
-
 #include "EMC2101.h"
 #include "EMC2103.h"
 #include "EMC2302.h"
 #include "TMP1075.h"
 
-static const char * TAG = "thermal";
+static const char *TAG = "thermal";
 
-esp_err_t Thermal_init(DeviceConfig * DEVICE_CONFIG)
+esp_err_t Thermal_init(DeviceConfig *DEVICE_CONFIG)
 {
     if (DEVICE_CONFIG->EMC2101) {
         ESP_RETURN_ON_ERROR(EMC2101_init(DEVICE_CONFIG->temp_offset), TAG, "Failed to initialise EMC2101");
-        // TODO: Improve this check.
         if (DEVICE_CONFIG->emc_ideality_factor != 0x00) {
-            ESP_LOGI(TAG, "EMC2101 configuration: Ideality Factor: %02x, Beta Compensation: %02x", DEVICE_CONFIG->emc_ideality_factor, DEVICE_CONFIG->emc_beta_compensation);
-            EMC2101_set_ideality_factor(DEVICE_CONFIG->emc_ideality_factor);
-            EMC2101_set_beta_compensation(DEVICE_CONFIG->emc_beta_compensation);
+            ESP_LOGI(TAG, "EMC2101 configuration: Ideality Factor: %02x, Beta Compensation: %02x",
+                     DEVICE_CONFIG->emc_ideality_factor, DEVICE_CONFIG->emc_beta_compensation);
+            ESP_RETURN_ON_ERROR(EMC2101_set_ideality_factor(DEVICE_CONFIG->emc_ideality_factor), TAG, "Failed to set ideality factor");
+            ESP_RETURN_ON_ERROR(EMC2101_set_beta_compensation(DEVICE_CONFIG->emc_beta_compensation), TAG, "Failed to set beta compensation");
         }
     }
     if (DEVICE_CONFIG->EMC2103) {
@@ -30,12 +28,10 @@ esp_err_t Thermal_init(DeviceConfig * DEVICE_CONFIG)
     if (DEVICE_CONFIG->TMP1075) {
         ESP_RETURN_ON_ERROR(TMP1075_init(DEVICE_CONFIG->temp_offset), TAG, "Failed to initialise TMP1075");
     }
-
     return ESP_OK;
 }
 
-//percent is a float between 0.0 and 1.0
-esp_err_t Thermal_set_fan_percent(DeviceConfig * DEVICE_CONFIG, float percent)
+esp_err_t Thermal_set_fan_percent(DeviceConfig *DEVICE_CONFIG, float percent)
 {
     if (DEVICE_CONFIG->EMC2101) {
         return EMC2101_set_fan_speed(percent);
@@ -44,12 +40,17 @@ esp_err_t Thermal_set_fan_percent(DeviceConfig * DEVICE_CONFIG, float percent)
         return EMC2103_set_fan_speed(percent);
     }
     if (DEVICE_CONFIG->EMC2302) {
-        EMC2302_set_fan_speed(percent);
+        // EMC2302_set_fan_speed gibt wahrscheinlich esp_err_t zurück – wir prüfen es
+        esp_err_t err = EMC2302_set_fan_speed(percent);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set EMC2302 fan speed");
+            return err;
+        }
     }
     return ESP_OK;
 }
 
-uint16_t Thermal_get_fan_speed(DeviceConfig * DEVICE_CONFIG) 
+uint16_t Thermal_get_fan_speed(DeviceConfig *DEVICE_CONFIG)
 {
     if (DEVICE_CONFIG->EMC2101) {
         return EMC2101_get_fan_speed();
@@ -63,7 +64,7 @@ uint16_t Thermal_get_fan_speed(DeviceConfig * DEVICE_CONFIG)
     return 0;
 }
 
-uint16_t Thermal_get_fan2_speed(DeviceConfig * DEVICE_CONFIG) 
+uint16_t Thermal_get_fan2_speed(DeviceConfig *DEVICE_CONFIG)
 {
     if (DEVICE_CONFIG->EMC2302) {
         return EMC2302_get_fan2_speed();
@@ -71,7 +72,7 @@ uint16_t Thermal_get_fan2_speed(DeviceConfig * DEVICE_CONFIG)
     return 0;
 }
 
-float Thermal_get_chip_temp(GlobalState * GLOBAL_STATE)
+float Thermal_get_chip_temp(GlobalState *GLOBAL_STATE)
 {
     if (!GLOBAL_STATE->ASIC_initalized) {
         return -1;
@@ -93,7 +94,7 @@ float Thermal_get_chip_temp(GlobalState * GLOBAL_STATE)
     return -1;
 }
 
-float Thermal_get_chip_temp2(GlobalState * GLOBAL_STATE)
+float Thermal_get_chip_temp2(GlobalState *GLOBAL_STATE)
 {
     if (!GLOBAL_STATE->ASIC_initalized) {
         return -1;

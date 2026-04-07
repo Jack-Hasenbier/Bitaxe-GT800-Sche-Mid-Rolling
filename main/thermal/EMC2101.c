@@ -17,93 +17,109 @@
 //   5. EMC2101_set_fan_speed: Eingangsvalidierung (0.0–1.0), verhindert
 //      Überlauf bei percent > 1.0 (speed würde > 63 werden, aber Reg
 //      ist 6-bit → silenter Überlauf im Original).
+//   6. Handle‑Prüfung vor jedem I2C-Zugriff – verhindert Crash
+//      bei nicht initialisiertem Gerät.
+//   7. Fehlerpropagierung: Bei I2C-Fehlern wird ein definierter
+//      Fehlerwert zurückgegeben (z.B. -273.15°C, 0 RPM) und
+//      Fehler geloggt.
+//   8. Initialisierungsflag `initialized`, um doppelte Init zu
+//      vermeiden.
 // ============================================================
 
 #include <stdio.h>
 #include "esp_log.h"
 #include "esp_check.h"
-
 #include "i2c_bitaxe.h"
 #include "EMC2101.h"
 
-static const char * TAG = "EMC2101";
+static const char *TAG = "EMC2101";
 
-static i2c_master_dev_handle_t emc2101_dev_handle;
-static int temp_offset;
+static i2c_master_dev_handle_t emc2101_dev_handle = NULL;
+static int temp_offset = 0;
+static bool initialized = false;
 
 esp_err_t EMC2101_init(int temp_offset_param)
 {
-    ESP_LOGI(TAG, "Initializing EMC2101 (Temperature offset: %d° C)", temp_offset_param);
+    if (initialized) {
+        ESP_LOGW(TAG, "EMC2101 already initialized");
+        return ESP_OK;
+    }
 
+    ESP_LOGI(TAG, "Initializing EMC2101 (Temperature offset: %d° C)", temp_offset_param);
     temp_offset = temp_offset_param;
 
-    if (i2c_bitaxe_add_device(EMC2101_I2CADDR_DEFAULT, &emc2101_dev_handle, TAG) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add device");
-        return ESP_FAIL;
+    esp_err_t err = i2c_bitaxe_add_device(EMC2101_I2CADDR_DEFAULT, &emc2101_dev_handle, TAG);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to add EMC2101 device");
+        emc2101_dev_handle = NULL;
+        return err;
     }
 
     // TACH-Eingang aktivieren
-    ESP_RETURN_ON_ERROR(
-        i2c_bitaxe_register_write_byte(emc2101_dev_handle, EMC2101_REG_CONFIG, 0x04),
-        TAG, "Failed to set TACH input"
-    );
+    err = i2c_bitaxe_register_write_byte(emc2101_dev_handle, EMC2101_REG_CONFIG, 0x04);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set TACH input");
+        return err;
+    }
 
     // Fan-Konfiguration: Direct-Setting-Modus, normale Polarität
-    ESP_RETURN_ON_ERROR(
-        i2c_bitaxe_register_write_byte(emc2101_dev_handle, EMC2101_FAN_CONFIG, 0b00100011),
-        TAG, "Failed to configure fan settings"
-    );
+    err = i2c_bitaxe_register_write_byte(emc2101_dev_handle, EMC2101_FAN_CONFIG, 0b00100011);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure fan settings");
+        return err;
+    }
 
-    // [OPT-1] Datenrate auf 8 Hz setzen (war Default 16 Hz, nie explizit gesetzt)
-    // 8 Hz ist ausreichend für Temperaturregelung, halbiert I2C-Buslast
-    ESP_RETURN_ON_ERROR(
-        i2c_bitaxe_register_write_byte(emc2101_dev_handle, EMC2101_REG_DATA_RATE, EMC2101_DATARATE_8_HZ),
-        TAG, "Failed to set data rate"
-    );
+    // Datenrate auf 8 Hz setzen
+    err = i2c_bitaxe_register_write_byte(emc2101_dev_handle, EMC2101_REG_DATA_RATE, EMC2101_DATARATE_8_HZ);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set data rate");
+        return err;
+    }
 
-    // NOTE: Temperatur-Filter (OPT-2) entfernt – EMC2101_TEMP_FILTER ist
-    // nicht im Projekt-Header definiert. Der LUT_HYSTERESIS-Register (0x4F)
-    // übernimmt eine ähnliche Funktion, ist aber für Fan-LUT-Betrieb gedacht.
-    // Filterung kann später über EMC2101_LUT_HYSTERESIS ergänzt werden.
-
+    initialized = true;
     return ESP_OK;
 }
 
 esp_err_t EMC2101_set_ideality_factor(uint8_t ideality)
 {
-    ESP_RETURN_ON_ERROR(
-        i2c_bitaxe_register_write_byte(emc2101_dev_handle, EMC2101_IDEALITY_FACTOR, ideality),
-        TAG, "Failed to set ideality factor"
-    );
-    return ESP_OK;
+    if (!initialized || emc2101_dev_handle == NULL) {
+        ESP_LOGE(TAG, "Device not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    return i2c_bitaxe_register_write_byte(emc2101_dev_handle, EMC2101_IDEALITY_FACTOR, ideality);
 }
 
 esp_err_t EMC2101_set_beta_compensation(uint8_t beta)
 {
-    ESP_RETURN_ON_ERROR(
-        i2c_bitaxe_register_write_byte(emc2101_dev_handle, EMC2101_BETA_COMPENSATION, beta),
-        TAG, "Failed to set beta compensation"
-    );
-    return ESP_OK;
+    if (!initialized || emc2101_dev_handle == NULL) {
+        ESP_LOGE(TAG, "Device not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    return i2c_bitaxe_register_write_byte(emc2101_dev_handle, EMC2101_BETA_COMPENSATION, beta);
 }
 
 esp_err_t EMC2101_set_fan_speed(float percent)
 {
-    // [OPT-5] Eingangsvalidierung: percent muss im Bereich 0.0–1.0 liegen
-    // Original: kein Check → bei percent > 1.0 überläuft 6-Bit-Register
+    if (!initialized || emc2101_dev_handle == NULL) {
+        ESP_LOGE(TAG, "Device not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Eingangsvalidierung
     if (percent < 0.0f) percent = 0.0f;
     if (percent > 1.0f) percent = 1.0f;
 
     uint8_t speed = (uint8_t)(63.0f * percent);
-    ESP_RETURN_ON_ERROR(
-        i2c_bitaxe_register_write_byte(emc2101_dev_handle, EMC2101_REG_FAN_SETTING, speed),
-        TAG, "Failed to set fan speed"
-    );
-    return ESP_OK;
+    return i2c_bitaxe_register_write_byte(emc2101_dev_handle, EMC2101_REG_FAN_SETTING, speed);
 }
 
 uint16_t EMC2101_get_fan_speed(void)
 {
+    if (!initialized || emc2101_dev_handle == NULL) {
+        ESP_LOGE(TAG, "Device not initialized");
+        return 0;
+    }
+
     uint8_t tach_lsb = 0, tach_msb = 0;
     esp_err_t err;
 
@@ -120,15 +136,11 @@ uint16_t EMC2101_get_fan_speed(void)
     }
 
     uint16_t reading = tach_lsb | (tach_msb << 8);
-
-    // [OPT-3] Null-Division-Schutz: TACH-Register noch nicht bereit
     if (reading == 0) {
         return 0;
     }
 
     uint16_t RPM = EMC2101_FAN_RPM_NUMERATOR / reading;
-
-    // Magischer Wert 82 RPM = Sensor-Fehler im Original beibehalten
     if (RPM == 82) {
         return 0;
     }
@@ -137,19 +149,24 @@ uint16_t EMC2101_get_fan_speed(void)
 
 float EMC2101_get_external_temp(void)
 {
+    if (!initialized || emc2101_dev_handle == NULL) {
+        ESP_LOGE(TAG, "Device not initialized");
+        return -273.15f;
+    }
+
     uint8_t temp_msb = 0, temp_lsb = 0;
     esp_err_t err;
 
     err = i2c_bitaxe_register_read(emc2101_dev_handle, EMC2101_EXTERNAL_TEMP_MSB, &temp_msb, 1);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to read external temperature MSB: %s", esp_err_to_name(err));
-        return -1.0f;
+        return -273.15f;
     }
 
     err = i2c_bitaxe_register_read(emc2101_dev_handle, EMC2101_EXTERNAL_TEMP_LSB, &temp_lsb, 1);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to read external temperature LSB: %s", esp_err_to_name(err));
-        return -1.0f;
+        return -273.15f;
     }
 
     uint16_t reading = (temp_msb << 8) | temp_lsb;
@@ -160,14 +177,13 @@ float EMC2101_get_external_temp(void)
         signed_reading |= 0xF800;
     }
 
-    // [OPT-4] Fault-Erkennung mit klarem Log (war schon vorhanden, beibehalten)
     if (signed_reading == EMC2101_TEMP_FAULT_OPEN_CIRCUIT) {
         ESP_LOGE(TAG, "TEMP_FAULT: Open circuit on external sensor!");
-        return -1.0f;
+        return -273.15f;
     }
     if (signed_reading == EMC2101_TEMP_FAULT_SHORT) {
         ESP_LOGE(TAG, "TEMP_FAULT: Short circuit on external sensor!");
-        return -1.0f;
+        return -273.15f;
     }
 
     float result = (float)signed_reading / 8.0f;
@@ -176,13 +192,16 @@ float EMC2101_get_external_temp(void)
 
 float EMC2101_get_internal_temp(void)
 {
-    uint8_t temp = 0;
-    esp_err_t err;
+    if (!initialized || emc2101_dev_handle == NULL) {
+        ESP_LOGE(TAG, "Device not initialized");
+        return -273.15f;
+    }
 
-    err = i2c_bitaxe_register_read(emc2101_dev_handle, EMC2101_INTERNAL_TEMP, &temp, 1);
+    uint8_t temp = 0;
+    esp_err_t err = i2c_bitaxe_register_read(emc2101_dev_handle, EMC2101_INTERNAL_TEMP, &temp, 1);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to read internal temperature: %s", esp_err_to_name(err));
-        return -1.0f;
+        return -273.15f;
     }
     return (float)temp + (float)temp_offset;
 }
